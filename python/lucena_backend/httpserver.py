@@ -118,4 +118,5 @@ def serve(*, home: str, host: str = "127.0.0.1", port: int = 8766, **kw):
 
 
 if __name__ == "__main__":
-    serve(home=os.environ.get("LUCENA_HOME", os.path.expanduser("~/.lucena")))
+    serve(home=os.environ.get("LUCENA_HOME", os.path.expanduser("~/.lucena")),
+          port=int(os.environ.get("LUCENA_BACKEND_PORT", "8766")))
