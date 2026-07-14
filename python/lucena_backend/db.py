@@ -101,22 +101,38 @@ class DB:
     def __init__(self, path: str, *, dsn: str | None = None):
         self._lock = threading.RLock()
         self._schema = _schema_for(path)
-        self._conn = psycopg.connect(dsn or _DSN, autocommit=False)
-        with self._lock:
-            self._conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{self._schema}"')
-            self._conn.execute(f'SET search_path TO "{self._schema}"')
-            self._conn.execute(_DDL)
-            self._conn.execute(
-                "INSERT INTO meta(key,value) VALUES('schema_version',%s) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(SCHEMA_VERSION),))
-            self._conn.commit()
+        # Read the DSN at connect time (not import), so a test run can point at a separate database.
+        self._dsn = dsn or os.environ.get("LUCENA_PG_DSN", _DSN)
+        self._conn = None
+        self._connect()
+
+    def _connect(self) -> None:
+        self._conn = psycopg.connect(self._dsn, autocommit=False)
+        self._conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{self._schema}"')
+        self._conn.execute(f'SET search_path TO "{self._schema}"')
+        self._conn.execute(_DDL)
+        self._conn.execute(
+            "INSERT INTO meta(key,value) VALUES('schema_version',%s) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(SCHEMA_VERSION),))
+        self._conn.commit()
 
     def close(self) -> None:
         with self._lock:
-            self._conn.close()
+            if self._conn is not None:
+                self._conn.close()
 
     def _ex(self, sql, params=()):
-        return self._conn.execute(sql, params)
+        # Reconnect once if the connection was dropped (e.g. an idle-terminated backend) — a dropped
+        # connection must not brick the server until restart.
+        try:
+            return self._conn.execute(sql, params)
+        except psycopg.OperationalError:
+            try:
+                self._conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._connect()
+            return self._conn.execute(sql, params)
 
     # -- meta --------------------------------------------------------------
     def get_meta(self, key: str) -> str | None:

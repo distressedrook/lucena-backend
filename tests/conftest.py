@@ -1,23 +1,39 @@
-"""Postgres test isolation: each DB(path) maps its path to a unique schema (s_*) in the
-configured database. Drop all such schemas around the session so runs start clean and
-don't accumulate."""
+"""Postgres test isolation. Tests run against a SEPARATE database (lucena_test), NOT the dev
+database the running backend uses — so `pg_terminate_backend` during schema cleanup can never
+kill a live backend's connection. Each DB(path) maps its path to a unique schema (s_*); those
+schemas are dropped around the session.
+"""
 
 import os
 
-import psycopg
-import pytest
+# Point every DB() in the test process at the test database, before anything imports/creates one.
+_TEST_DSN = os.environ.get("LUCENA_TEST_DSN", "postgresql:///lucena_test")
+os.environ["LUCENA_PG_DSN"] = _TEST_DSN
 
-_DSN = os.environ.get("LUCENA_PG_DSN", "postgresql:///lucena_dev")
+import psycopg  # noqa: E402
+import pytest   # noqa: E402
+
+
+def _ensure_test_db():
+    try:
+        psycopg.connect(_TEST_DSN).close()
+        return
+    except Exception:
+        pass
+    admin = psycopg.connect("postgresql:///postgres", autocommit=True)
+    try:
+        admin.execute("CREATE DATABASE lucena_test")
+    finally:
+        admin.close()
 
 
 def _drop_test_schemas():
     try:
-        conn = psycopg.connect(_DSN, autocommit=True)
+        conn = psycopg.connect(_TEST_DSN, autocommit=True)
     except Exception:
-        return  # no Postgres → DB-backed tests will error/skip on their own
+        return
     with conn.cursor() as cur:
-        # Tests create DB() without closing, so a schema can still have open backends;
-        # terminate them first or DROP SCHEMA CASCADE blocks on their locks.
+        # Only OTHER connections to THIS (test) database — never the dev backend.
         cur.execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
                     "WHERE datname = current_database() AND pid <> pg_backend_pid()")
         cur.execute("SELECT schema_name FROM information_schema.schemata "
@@ -29,6 +45,7 @@ def _drop_test_schemas():
 
 @pytest.fixture(scope="session", autouse=True)
 def _clean_pg_schemas():
+    _ensure_test_db()
     _drop_test_schemas()
     yield
     _drop_test_schemas()
