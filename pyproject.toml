@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lucena-backend"
+version = "0.1.0"
+description = "Lucena backend — orchestrator + state machine + LLM adapter (closed)"
+requires-python = ">=3.10"
+dependencies = []          # lucena-engine is installed from the sibling engine/ (editable)
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "python-chess>=1.10"]   # tests/tooling only
+
+[tool.setuptools]
+package-dir = {"" = "python"}
+
+[tool.setuptools.packages.find]
+where = ["python"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: needs big downloads or long engine runs",
+    "engine: needs a Stockfish binary",
+]
