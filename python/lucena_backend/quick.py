@@ -11,6 +11,7 @@ never to invent — it interprets, it doesn't calculate.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 
 from .llm import make_adapter, Message, GenerateOptions, LLMAdapter
@@ -26,41 +27,25 @@ _SYSTEM = (
 
 
 class QuickCoach:
-    def __init__(self, *, mcp_url: str, model: str, llm: LLMAdapter | None = None):
-        self.mcp_url = mcp_url
+    def __init__(self, *, store, engine, model: str, llm: LLMAdapter | None = None):
+        self.store = store          # StateStore
+        self.engine = engine        # EngineClient (gRPC)
         self.model = model
         self._llm: LLMAdapter = llm or make_adapter({"provider": "gemini", "default_model": model})
 
     async def explain(self, *, session_id: str, fen: str, move: str | None = None,
                       correct: bool | None = None) -> dict:
-        from mcp import ClientSession
-        from mcp.client.streamable_http import streamablehttp_client
-
-        async with streamablehttp_client(self.mcp_url) as (r, w, _):
-            async with ClientSession(r, w) as s:
-                await s.initialize()
-
-                async def call(tool: str, args: dict) -> dict:
-                    res = await s.call_tool(tool, args)
-                    txt = res.content[0].text if res.content else "{}"
-                    try:
-                        return json.loads(txt)
-                    except ValueError:
-                        return {"raw": txt}
-
-                # Ground: a move → its refutation via evaluate; a bare position → the fact sheet.
-                if move:
-                    facts = await call("evaluate", {"fen": fen, "sans": [move]})
-                else:
-                    facts = await call("analyze_and_show", {"fen": fen, "focus": "analysis"})
-
-                prompt = self._prompt(fen, move, correct, facts)
-                text = await self._generate(prompt)
-                await call("push_beat", {"beats": [{
-                    "kind": "say",
-                    "tone": "correct" if correct is False else "teach",
-                    "text": text,
-                }]})
+        # Ground: a move → its refutation via Evaluate; a bare position → the fact sheet.
+        if move:
+            facts = await asyncio.to_thread(self.engine.evaluate, fen, [move])
+        else:
+            facts = await asyncio.to_thread(self.engine.analyze, fen)
+        prompt = self._prompt(fen, move, correct, facts)
+        text = await self._generate(prompt)
+        self.store.append_beats([{
+            "kind": "say", "tone": "correct" if correct is False else "teach",
+            "segments": [{"text": text}], "stops": False,
+        }])
         return {"ok": True, "text": text}
 
     def _prompt(self, fen: str, move: str | None, correct: bool | None, facts: dict) -> str:

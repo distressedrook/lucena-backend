@@ -9,6 +9,11 @@ description = "Lucena backend — orchestrator + state machine + LLM adapter (cl
 requires-python = ">=3.10"
 dependencies = [
     "psycopg[binary]>=3.2",   # Postgres durable store
+    "grpcio>=1.60",           # engine gRPC client
+    "protobuf>=4.0",          # generated stubs
+    "fastapi>=0.110",         # WS/REST server
+    "uvicorn>=0.29",          # ASGI server
+    "websockets>=12.0",       # WS
 ]                             # lucena-engine is installed from the sibling engine/ (editable)
 
 [project.optional-dependencies]

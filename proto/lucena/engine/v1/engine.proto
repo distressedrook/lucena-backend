@@ -1,0 +1,130 @@
+// Lucena grounding engine — gRPC contract (v0.1).
+// Open, stateless chess-truth. Every RPC is a pure function of its request.
+// SAN is the only move notation on the wire; UCI is engine-internal only.
+// See docs/grounding-engine-api.md for the authoritative spec.
+syntax = "proto3";
+package lucena.engine.v1;
+
+// ── shared value objects ────────────────────────────────────────────────
+message Limit {                       // exactly one — determinism knob
+  oneof kind { uint32 movetime_ms = 1; uint64 nodes = 2; uint32 depth = 3; }
+  uint32 threads = 4;                 // default 1 for reproducibility
+}
+message Score { oneof kind { int32 cp = 1; int32 mate = 2; } }        // POV = side to move
+message Eval  { int32 cp = 1; double win_pct = 2; string glyph = 3; } // glyph ∈ "","?!","?","??","!"
+message PieceOn { string square = 1; string piece = 2; string color = 3; } // piece 'P'..'K'; color white|black
+message Material { int32 white = 1; int32 black = 2; int32 net = 3; string standing = 4; }
+message Line { uint32 rank = 1; Eval eval = 2; repeated string pv_san = 3; }   // SAN only
+message Fact {
+  string id = 1;                      // "F1".. (assigned by the engine)
+  string kind = 2;                    // hanging|threat|defender-removed|fork|pin|combination
+  repeated string squares = 3;        // 2 → arrow a→b; 1 → highlight
+  string text = 4;                    // short human sentence
+  string concept_id = 5;              // mastery routing
+  double salience = 6;                // 0..1
+  string provenance = 7;              // see|nullmove|static|...
+}
+
+message Position { string fen = 1; }  // the one universal input
+message Empty {}
+
+// ── Truth: Stockfish + board core (no Maia) ─────────────────────────────
+service Truth {
+  rpc ValidateFen (Position)     returns (ValidateResp);
+  rpc DetectFens  (TextReq)      returns (DetectFensResp);
+  rpc ParsePgn    (TextReq)      returns (ParsePgnResp);
+  rpc AnnotateGame(TextReq)      returns (AnnotateGameResp);   // SKELETON, parked — returns UNIMPLEMENTED
+  rpc Analyze     (AnalyzeReq)   returns (AnalyzeResp);        // FEN → fact sheet
+  rpc Evaluate    (EvaluateReq)  returns (EvaluateResp);
+  rpc Hints       (HintsReq)     returns (HintsResp);
+  rpc ExploreLine (ExploreReq)   returns (ExploreResp);
+  rpc LegalMoves  (Position)     returns (MovesResp);
+  rpc Apply       (ApplyReq)     returns (Position);           // fen + move(SAN) → fen
+  rpc GetInfo     (Empty)        returns (InfoResp);
+}
+
+message ValidateResp   { bool legal = 1; string side_to_move = 2; string error = 3; }
+message TextReq        { string text = 1; }
+message DetectFensResp { repeated string fens = 1; }
+
+message ParsePgnResp {
+  bool ok = 1; string error = 2;
+  string result = 3; string start_fen = 4;
+  map<string,string> headers = 5;
+  repeated Ply plies = 6;
+}
+message Ply { uint32 ply = 1; uint32 move_no = 2; string side = 3; string san = 4;   // SAN only
+              string fen_before = 5; string fen_after = 6; }
+
+// PGN → annotated fact sheet (engine walks the game). Shape lifted from gamepass.
+message AnnotateGameResp {
+  bool ok = 1; string error = 2;
+  string result = 3; string start_fen = 4; map<string,string> headers = 5;
+  repeated AnnotatedPly plies = 6;
+  repeated string summary = 7;
+}
+message AnnotatedPly {
+  uint32 ply = 1; uint32 move_no = 2; string side = 3; string san = 4; string fen_after = 5;
+  string class = 6; string glyph = 7; double delta_win_pct = 8; Eval eval = 9;
+  string note = 10;
+}
+
+message AnalyzeReq {
+  string fen = 1; Limit limit = 2; uint32 multipv = 3;   // default multipv 2
+  Focus focus = 4;
+  Limit fact_limit = 5;
+  uint32 top_facts = 6;                                  // ≤5
+}
+enum Focus { FULL = 0; EVAL = 1; THREATS = 2; POSITIONAL = 3; }
+message AnalyzeResp {
+  string fen = 1; string side_to_move = 2; repeated PieceOn pieces = 3;
+  Material material = 4; Eval eval = 5;
+  repeated Line lines = 6;
+  repeated Fact facts = 7;
+  Positional positional = 8;                             // present only when FOCUS=POSITIONAL
+}
+message Positional { string phase = 1; repeated string leads = 2; map<string,Term> terms = 3; }
+message Term { int32 cp = 1; string standing = 2; repeated string features = 3; }
+
+message EvaluateReq { string fen = 1; repeated string moves = 2; Limit limit = 3; }   // moves = SAN
+message EvaluateResp {
+  string fen = 1; string side_to_move = 2; Material material = 3;
+  string san = 4; string captured = 5; string class = 6; string glyph = 7;
+  double delta_win_pct = 8; Eval eval = 9;
+  BestMove best = 10; repeated string refutation_pv = 11; repeated Fact facts = 12;
+  repeated MoveRank ranked = 13; string verdict = 14;
+}
+message BestMove { string san = 1; repeated string pv_san = 2; Eval eval = 3; }
+message MoveRank { string san = 1; Eval eval = 2; double delta_win_pct = 3; }   // SAN only
+
+message HintsReq  { string fen = 1; Limit limit = 2; }
+message HintsResp { string fen = 1; string best_san = 2; repeated Hint hints = 3; }
+message Hint { uint32 rung = 1; string text = 2; repeated string squares = 3; string provenance = 4; }
+
+message ExploreReq  { string fen = 1; repeated string moves = 2; bool analyze = 3; Limit limit = 4; }  // moves = SAN, 1..12
+message ExploreResp {
+  string end_fen = 1; string side_to_move = 2; repeated string line_san = 3;
+  string terminal = 4;
+  Material material = 5; Eval eval = 6; string best_san = 7; repeated string pv_san = 8; int32 mate_in = 9;
+}
+message ApplyReq { string fen = 1; string move = 2; }   // move = SAN
+message MovesResp { repeated string san = 1; }          // SAN only
+message InfoResp { string engine_version = 1; uint32 stockfish_major = 2; bool maia_available = 3; }
+
+// ── Behaviour: Maia (optional; predicts human moves; NEVER an eval) ──────
+service Behaviour {
+  rpc TopHumanMoves  (MaiaReq)           returns (MaiaResp);
+  rpc CommonMistakes (CommonMistakesReq) returns (CommonMistakesResp);
+  rpc PoisonedLine   (PoisonedLineReq)   returns (PoisonedLineResp);
+}
+message MaiaReq  { string fen = 1; uint32 rating = 2; uint32 oppo_rating = 3; uint32 n = 4; }
+message MaiaResp { repeated MaiaMove moves = 1; }
+message MaiaMove { string san = 1; uint32 rank = 2; double policy = 3; repeated int32 wdl = 4; Score eval = 5; } // SAN; eval never surfaced
+message CommonMistakesReq { string fen = 1; uint32 rating = 2; Limit limit = 3; }
+message CommonMistakesResp { uint32 rating = 1; string side_to_move = 2; string best_san = 3;
+                            repeated MistakeMove moves = 4; repeated string mistakes = 5; }
+message MistakeMove { string san = 1; uint32 rank = 2; string class = 3; double delta_win_pct = 4; repeated string refutation = 5; } // refutation = SAN
+message PoisonedLineReq  { string fen = 1; uint32 rating = 2; }
+message PoisonedLineResp { string fen = 1; bool has_poisoned_line = 2;
+                          repeated PoisonedStep poisoned_line = 3; string fatal = 4; string idea = 5; }
+message PoisonedStep { string san = 1; string fen = 2; }   // SAN only

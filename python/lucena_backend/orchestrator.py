@@ -15,6 +15,7 @@ Enable with LUCENA_ORCHESTRATED=1.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 
 from .llm import make_adapter, Message, GenerateOptions, LLMAdapter
@@ -53,53 +54,45 @@ _GRADE_SYSTEM = (
 )
 
 
+def _say_beat(text: str, tone: str = "teach") -> dict:
+    return {"kind": "say", "tone": tone, "segments": [{"text": text}], "stops": False}
+
+
+def _ask_beat(text: str, hints: list[str] | None = None) -> dict:
+    b: dict = {"kind": "ask", "segments": [{"text": text}], "stops": True}   # stops -> gate locks
+    if hints:
+        b["hints"] = hints
+    return b
+
+
 class Orchestrator:
-    def __init__(self, *, mcp_url: str, model: str, llm: LLMAdapter | None = None, fallback=None):
-        self.mcp_url = mcp_url
+    """The deterministic coaching pipeline. Depends only on: the state machine (in-process),
+    the engine gRPC client (grounding), and the LLM adapter (generation). No MCP, no engine
+    imports — the open/closed firewall holds."""
+
+    def __init__(self, *, store, engine, model: str, llm: LLMAdapter | None = None):
+        self.store = store          # StateStore
+        self.engine = engine        # EngineClient (gRPC)
         self.model = model
-        self.fallback = fallback
-        # Depend only on the generic interface; provider + model are config.
         self._llm: LLMAdapter = llm or make_adapter({"provider": "gemini", "default_model": model})
         self._last_tokens: dict | None = None
 
     async def run_turn(self, session_id: str, text: str | None = None) -> dict:
-        from mcp import ClientSession
-        from mcp.client.streamable_http import streamablehttp_client
-
-        handled: dict | None = None
-        async with streamablehttp_client(self.mcp_url) as (r, w, _):
-            async with ClientSession(r, w) as s:
-                await s.initialize()
-
-                async def call(tool: str, args: dict) -> dict:
-                    res = await s.call_tool(tool, args)
-                    txt = res.content[0].text if res.content else "{}"
-                    try:
-                        return json.loads(txt)
-                    except ValueError:
-                        return {"raw": txt}
-
-                ri = await call("read_input", {})
-                cls = ri.get("classification")
-                if cls == "OPEN" and text and text.strip():
-                    handled = await self._coach(call, ri, text.strip())
-                elif cls == "PROBE_ANSWER" and text and text.strip():
-                    handled = await self._probe_answer(call, ri, text.strip())
-
-        if handled is not None:
-            return handled
-        if self.fallback is not None:
-            return await self.fallback.run_turn(session_id, text)
-        return {"ok": True, "orchestrated": False, "flow": "unhandled"}
+        self.store.read_input()                     # consume the mailbox (parity)
+        if not (text and text.strip()):
+            return {"ok": True, "orchestrated": False, "flow": "unhandled"}
+        fen = self.store.board_view
+        if self.store._gate_awaiting:               # mid-probe -> grade the answer
+            return await self._probe_answer(fen, text.strip())
+        return await self._coach(fen, text.strip())
 
     # -- flows ---------------------------------------------------------------
 
-    async def _coach(self, call, ri: dict, text: str) -> dict:
-        """OPEN turn. The model decides ask (Socratic, default) vs tell (explain) and generates.
-        On ask we attach the grounded hint ladder from get_hints; the ask beat stops the turn."""
-        fen = ri.get("board_fen")
-        facts = await call("analyze_and_show", {"fen": fen, "focus": "analysis"}) if fen else {}
-        hints_res = await call("get_hints", {"fen": fen}) if fen else {}
+    async def _coach(self, fen: str | None, text: str) -> dict:
+        """OPEN turn. Ground via the engine (gRPC), let the model pick ask (Socratic, default) vs
+        tell, then act on the state machine. An ask attaches the grounded hint ladder + locks the gate."""
+        facts = await asyncio.to_thread(self.engine.analyze, fen) if fen else {}
+        hints_res = await asyncio.to_thread(self.engine.hints, fen) if fen else {}
         best = hints_res.get("best")
         hints = [h for h in (hints_res.get("hints") or []) if isinstance(h, str)][:3]
 
@@ -116,38 +109,27 @@ class Orchestrator:
         mode = (out.get("mode") or "ask").lower()
         body = out.get("text") or "Let's take a look at this position together."
         if mode == "tell":
-            await call("push_beat", {"beats": [{"kind": "say", "tone": "teach", "text": body}]})
+            self.store.append_beats([_say_beat(body)])
         else:
-            beat: dict = {"kind": "ask", "text": body}      # kind=ask -> stops -> gate locks
-            if hints:
-                beat["hints"] = hints                       # grounded ladder
-            await call("push_beat", {"beats": [beat]})
+            self.store.append_beats([_ask_beat(body, hints or None)])
+            self.store.set_gate(True)               # the ask locks the Socratic gate
         return {"ok": True, "orchestrated": True, "flow": f"coach:{mode}",
-                "tokens": self._last_tokens,
-                "tool_calls": ["read_input", "analyze_and_show", "get_hints", "push_beat"]}
+                "tokens": self._last_tokens}
 
-    async def _probe_answer(self, call, ri: dict, text: str) -> dict:
-        fen = ri.get("board_fen")
-        facts = await call("analyze_and_show", {"fen": fen, "focus": "analysis"}) if fen else {}
+    async def _probe_answer(self, fen: str | None, text: str) -> dict:
+        """The player answered a probe. Grade vs the engine's read, give feedback, unlock the gate."""
+        facts = await asyncio.to_thread(self.engine.analyze, fen) if fen else {}
         verdict = await self._gen_json(
             _GRADE_SYSTEM,
             f"Player's answer: {text}\n\nEngine's grounded analysis (grade ONLY against this):\n"
             f"{json.dumps(facts)[:2000]}\n\nGrade and give feedback as JSON.")
         correct = bool(verdict.get("correct"))
         feedback = verdict.get("feedback") or "Let's look at that together."
-        await call("push_beat", {"beats": [
-            {"kind": "say", "tone": "praise" if correct else "correct", "text": feedback}]})
-        recorded = False
-        concept = verdict.get("concept")
-        quality = verdict.get("quality")
-        if concept and isinstance(quality, (int, float)):
-            res = await call("record_observation", {"concept": str(concept),
-                                                    "quality": float(quality), "type": "probe"})
-            recorded = isinstance(res, dict) and "error" not in res
+        self.store.append_beats([_say_beat(feedback, tone="praise" if correct else "correct")])
+        self.store.set_gate(False)                  # answered -> unlock
+        # (mastery recording parked this cycle; the seam is here — record vs verdict.concept/quality.)
         return {"ok": True, "orchestrated": True, "flow": "probe_answer",
-                "correct": correct, "recorded": recorded, "tokens": self._last_tokens,
-                "tool_calls": ["read_input", "analyze_and_show", "push_beat",
-                               "record_observation"]}
+                "correct": correct, "tokens": self._last_tokens}
 
     # -- generation ----------------------------------------------------------
 
@@ -164,5 +146,4 @@ class Orchestrator:
                               "total": usage.total_tokens} if usage is not None else None)
 
     async def aclose(self) -> None:
-        if self.fallback is not None:
-            await self.fallback.aclose()
+        return None
