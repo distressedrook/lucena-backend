@@ -32,8 +32,10 @@ class EngineClient:
 
     # -- the grounding surface the coaching loop uses ----------------------
     def analyze(self, fen: str, *, multipv: int = 2, nodes=None, movetime_ms: int = 1500) -> dict:
+        # POSITIONAL focus returns the full read PLUS the positional standings (king-safety/activity/
+        # pawns/center in plain English) — the legacy briefing's key ingredient.
         req = pb.AnalyzeReq(fen=fen, limit=_limit(nodes, movetime_ms), multipv=multipv,
-                            top_facts=5, focus=pb.FULL)
+                            top_facts=5, focus=pb.POSITIONAL)
         return _d(self.truth.Analyze(req))
 
     def hints(self, fen: str, *, nodes=None, movetime_ms: int = 1500) -> dict:

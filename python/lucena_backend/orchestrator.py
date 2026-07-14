@@ -82,30 +82,56 @@ def _ask_beat(text: str, hints: list[str] | None = None) -> dict:
     return b
 
 
+def _cap(s: str) -> str:
+    return s[0].upper() + s[1:] if s else s
+
+
+def _eval_line(facts: dict) -> str:
+    """The legacy briefing's opening verdict — turn + who's better, all White-POV, plain words."""
+    stm = facts.get("side_to_move", "white")
+    turn = "White" if stm == "white" else "Black"
+    wp_stm = (facts.get("eval") or {}).get("win_pct", 50.0)
+    white_wp = wp_stm if stm == "white" else 100 - wp_stm
+    d = white_wp - 50
+    if abs(d) <= 5:
+        verdict = "the position is roughly equal"
+    else:
+        leader = "White" if d > 0 else "Black"
+        aw = white_wp if d > 0 else 100 - white_wp
+        band = ("is completely winning" if aw >= 90 else "is winning" if aw >= 75
+                else "is clearly better" if aw >= 60 else "is slightly better")
+        verdict = f"{leader} {band}"
+    return f"{turn} to move; {verdict}."
+
+
 def _ground(facts: dict) -> str:
-    """A COMPACT, COMPLETE fact sheet for the prompt — the exact piece roster, material standing,
-    eval-in-words, top lines, and tactical facts. Never a truncated JSON dump (that fed the model a
-    broken blob and it hallucinated pieces). Everything the coach may claim is in here."""
+    """The coach's grounded briefing — the legacy `build_analysis` shape that worked well: an eval
+    verdict, the material standing, the four strategic standings (king-safety/activity/pawns/center,
+    leads first) in plain English, then the tactical facts. All White-POV so the coach never flips
+    perspective. Plus the exact piece ROSTER (belt-and-suspenders: the coach can verify every piece it
+    names — this is the ONLY truth about where pieces are). Never a truncated JSON dump."""
     if not facts:
         return "(no position on the board yet)"
+    out = [_eval_line(facts)]
+    if (m := facts.get("material") or {}).get("standing"):
+        out.append(_cap(m["standing"]) + ".")
+    pos = facts.get("positional") or {}
+    terms = pos.get("terms") or {}
+    leads = pos.get("leads") or []
+    strategic = ["king_safety", "activity", "pawns", "center"]
+    ordered = [t for t in leads if t in strategic] + [t for t in strategic if t not in leads]
+    for t in ordered:
+        if st := (terms.get(t) or {}).get("standing"):
+            out.append(_cap(st) + ".")
+    if tac := facts.get("facts") or []:
+        out.append("Tactics: " + "; ".join(f.get("text", "") for f in tac) + ".")
     pieces = facts.get("pieces") or []
     white = ",".join(sorted(p.get("piece", "") + p.get("square", "")
                             for p in pieces if p.get("color") == "white"))
     black = ",".join(sorted(p.get("piece", "") + p.get("square", "")
                             for p in pieces if p.get("color") == "black"))
-    out = [f"Side to move: {facts.get('side_to_move', '?')}",
-           f"White pieces: {white}", f"Black pieces: {black}"]
-    if (m := facts.get("material") or {}).get("standing"):
-        out.append(f"Material: {m['standing']}")
-    if (e := facts.get("eval") or {}):
-        out.append(f"Eval: win% {e.get('win_pct')} for the side to move")
-    for ln in (facts.get("lines") or [])[:2]:
-        if pv := " ".join(ln.get("pv_san") or []):
-            out.append(f"Best line #{ln.get('rank')}: {pv}")
-    if tac := facts.get("facts") or []:
-        out.append("Tactical facts (the ONLY tactics you may cite):")
-        for f in tac[:5]:
-            out.append(f"  - {f.get('text')} [{f.get('kind')} @ {','.join(f.get('squares') or [])}]")
+    out.append(f"Pieces on the board (verify every piece you name against this) — "
+               f"White: {white}; Black: {black}")
     return "\n".join(out)
 
 
