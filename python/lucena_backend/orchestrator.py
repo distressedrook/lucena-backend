@@ -227,12 +227,23 @@ class Orchestrator:
             after = self.store.board_view
             facts = await asyncio.to_thread(self.engine.analyze, after) if after else {}
             san = verdict.get("san") or uci
+            # PERSPECTIVE: the player is whoever was to move BEFORE the move; after it, it's the
+            # opponent's turn — so the fact sheet (side-to-move POV) is the OPPONENT's view.
+            player = "White" if fen_before.split()[1] == "w" else "Black"
+            opp = "Black" if player == "White" else "White"
             out = await self._gen_json(
                 _MOVE_SYSTEM,
-                f"The player just played: {san}\n"
-                f"Engine verdict on that move:\n{_ground_move(verdict)}\n\n"
-                f"The resulting position — the fact sheet to guide the NEXT step:\n"
-                f"{_ground(facts)}\n\nReact as JSON.")
+                f"You are coaching the {player} player. You (playing {player}) just played {san}.\n\n"
+                f"Engine verdict on YOUR move — THIS is the reason it's good or bad. Judge from the "
+                f"class + (if a mistake) the opponent's refutation. Do NOT use the fact sheet's "
+                f"'after a pass' threats as the reason.\n{_ground_move(verdict)}\n\n"
+                f"After your move it is now {opp}'s turn (your OPPONENT). The fact sheet below is from "
+                f"{opp}'s side-to-move point of view: 'your' in it means {opp} (the opponent), NOT you. "
+                f"A hanging piece belongs to its OWN colour — a {opp}-coloured piece is the opponent's, "
+                f"a {player}-coloured piece is yours. Never tell the player their own piece hangs when "
+                f"it is the opponent's.\n"
+                f"Fact sheet (position after your move, {opp} to move):\n{_ground(facts)}\n\n"
+                f"React as JSON.")
             body = out.get("text") or f"You played {san}."
             tone = "praise" if str(verdict.get("class")) in ("best", "ok", "only_move", "brilliant") else "correct"
             self.store.append_beats([_say_beat(body, tone=tone)])
