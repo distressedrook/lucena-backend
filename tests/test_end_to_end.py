@@ -91,28 +91,36 @@ def test_pasted_fen_sets_the_board(tmp_path, engine_server):
 
 
 @requires_engine
-def test_move_updates_and_publishes_the_board(tmp_path, engine_server):
-    """A freeform /move applies the move (engine) and publishes the new board — so the piece the
-    player moved sticks instead of snapping back to the server's stale board."""
+def test_move_updates_board_anchors_orientation_and_coaches(tmp_path, engine_server):
+    """A /move: applies the move (board sticks), extends history so orientation anchors on the line
+    start, AND the coach reacts to the move — a beat streams back."""
     from fastapi.testclient import TestClient
 
     app = build_app(home=str(tmp_path), engine=EngineClient(engine_server),
-                    llm=_StubLLM({"mode": "tell", "text": "ok"}), model="stub")
+                    llm=_StubLLM({"text": "You played e4 — a strong central move. Develop next."}),
+                    model="stub")
     client = TestClient(app)
     with client.websocket_connect("/ws") as ws:
         while ws.receive_json()["type"] != "ready":
             pass
-        # POST a move (as the app's CoachBridge.playMove does) — e2e4 from the start.
         r = client.post("/move", json={"uci": "e2e4", "fen": STARTPOS})
         assert r.status_code == 200
-        board = None
-        for _ in range(20):
+        board = history = beat = None
+        for _ in range(40):
             m = ws.receive_json()
             if m["type"] == "board" and m.get("fen"):
                 board = m
+            elif m["type"] == "history" and m.get("plies"):
+                history = m
+            elif m["type"] == "beats" and m.get("appended"):
+                beat = m
+            if board and history and beat:
                 break
-        assert board is not None, "no board event after /move"
-        assert board["fen"].split()[0] == "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR"
+        assert board and board["fen"].split()[0] == "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR"
+        # orientation anchor: the line's first ply is the pre-move position (white to move)
+        assert history and history["plies"][0]["fen"].split()[1] == "w"
+        # the coach reacted to the move
+        assert beat is not None, "coach did not react to the move"
 
 
 @requires_engine

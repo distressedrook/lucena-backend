@@ -53,6 +53,18 @@ _GRADE_SYSTEM = (
     "answer), feedback (string, shown to the player), concept (string, a one-word theme, or '')."
 )
 
+_MOVE_SYSTEM = (
+    "You are a chess coach reacting to the move the player JUST made in a play-along. You are given "
+    "the move, the engine's verdict on it (its class, whether it was best, the refutation if it was a "
+    "mistake), and the engine's grounded read of the RESULTING position. In 1-2 short sentences: name "
+    "the move they played, say plainly whether it's strong/best or a mistake (grounded ONLY in the "
+    "verdict), give the one key reason, then point toward what to do NEXT — a nudge, not the full "
+    "answer. Ground everything ONLY in the facts — never invent a piece, square, line, or number; "
+    "translate evals into plain words. PERSPECTIVE: address the player as 'you' (they made the move); "
+    "the opponent is the other colour, and threats belong to the opponent. Warm and direct. Return "
+    "JSON: {\"text\": string}."
+)
+
 
 def _say_beat(text: str, tone: str = "teach") -> dict:
     return {"kind": "say", "tone": tone, "segments": [{"text": text}], "stops": False}
@@ -89,6 +101,8 @@ class Orchestrator:
             detected = await asyncio.to_thread(self.engine.detect_fens, text)
             if detected:
                 self.store.write_board(detected[-1])
+                # A pasted position starts a fresh line — the board orientation anchors on it.
+                self.store.write_history([{"n": 0, "san": "", "uci": "", "fen": detected[-1]}])
             fen = self.store.board_view
             if self.store._gate_awaiting:           # mid-probe -> grade the answer
                 return await self._probe_answer(fen, text)
@@ -125,6 +139,30 @@ class Orchestrator:
             self.store.set_gate(True)               # the ask locks the Socratic gate
         return {"ok": True, "orchestrated": True, "flow": f"coach:{mode}",
                 "tokens": self._last_tokens}
+
+    async def coach_move(self, fen_before: str, uci: str) -> dict:
+        """The player made a move. Judge it against the engine and coach the next step — the beat that
+        keeps a play-along going (correct/mistake + what to do next), grounded in the fact sheet."""
+        self.store.publish_status("Thinking…")
+        try:
+            verdict = await asyncio.to_thread(self.engine.evaluate, fen_before, [uci])
+            after = self.store.board_view
+            facts = await asyncio.to_thread(self.engine.analyze, after) if after else {}
+            san = verdict.get("san") or uci
+            out = await self._gen_json(
+                _MOVE_SYSTEM,
+                f"The player just played: {san}\n"
+                f"Engine verdict on that move (class/glyph/Δwin%/best/refutation):\n"
+                f"{json.dumps(verdict)[:1500]}\n"
+                f"The resulting position — the fact sheet to guide the NEXT step:\n"
+                f"{json.dumps(facts)[:1500]}\n\nReact as JSON.")
+            body = out.get("text") or f"You played {san}."
+            tone = "praise" if str(verdict.get("class")) in ("best", "ok", "only_move", "brilliant") else "correct"
+            self.store.append_beats([_say_beat(body, tone=tone)])
+            return {"ok": True, "orchestrated": True, "flow": "coach_move",
+                    "class": verdict.get("class"), "tokens": self._last_tokens}
+        finally:
+            self.store.publish_status(None)
 
     async def _probe_answer(self, fen: str | None, text: str) -> dict:
         """The player answered a probe. Grade vs the engine's read, give feedback, unlock the gate."""

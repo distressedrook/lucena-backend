@@ -107,17 +107,29 @@ def build_app(*, home: str, engine=None, llm=None, model: str = _DEFAULT_MODEL,
 
     @app.post("/move")
     async def move(body: dict):
-        """Freeform move: apply it (engine) and publish the new board so it sticks. (Drill
-        adjudication — correct/wrong/finished — is the follow-up; this returns a non-drill result.)"""
+        """The player made a move: apply it, extend the move line (so the board orientation stays
+        locked to the line's start), publish the new board, and let the coach react to the move —
+        judge it + guide the next step. That coaching beat streams back over the WS."""
         uci, fen = body.get("uci"), body.get("fen")
         if not (uci and fen):
             return JSONResponse({"error": "bad_move"}, status_code=400)
         try:
-            new_fen = await asyncio.to_thread(eng.apply, fen, uci)
+            played = await asyncio.to_thread(eng.apply_move, fen, uci)   # {fen, san}
         except Exception as e:  # noqa: BLE001
             return JSONResponse({"error": "illegal_move", "detail": str(e)}, status_code=400)
-        await asyncio.to_thread(_locked, store.write_board, new_fen)
-        return {}   # non-drill → the app lets the (freshly published) live board take over
+        new_fen = played["fen"]
+
+        def _commit():
+            with lock:
+                hist = list(store._history or [])
+                if not hist:                       # seed the line's start (orientation anchors here)
+                    hist = [{"n": 0, "san": "", "uci": "", "fen": fen}]
+                hist.append({"n": len(hist), "san": played["san"], "uci": uci, "fen": new_fen})
+                store.write_history(hist)
+                store.write_board(new_fen)
+        await asyncio.to_thread(_commit)
+        await orch.coach_move(fen, uci)            # judge + guide (beat streams over the WS)
+        return {"ok": True}
 
     @app.get("/config")
     async def config():

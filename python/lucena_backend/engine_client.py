@@ -52,6 +52,11 @@ class EngineClient:
         """fen + move (SAN or UCI — the board core accepts both) -> the resulting fen."""
         return self.truth.Apply(pb.ApplyReq(fen=fen, move=move)).fen
 
+    def apply_move(self, fen: str, move: str) -> dict:
+        """Play one move -> {fen, san}. (ExploreLine gives the SAN back for the move navigator.)"""
+        r = self.truth.ExploreLine(pb.ExploreReq(fen=fen, moves=[move], analyze=False))
+        return {"fen": r.end_fen, "san": (r.line_san[0] if r.line_san else move)}
+
     def validate_fen(self, fen: str) -> dict:
         r = self.truth.ValidateFen(pb.Position(fen=fen))
         return {"legal": r.legal, "side_to_move": r.side_to_move, "error": r.error}
