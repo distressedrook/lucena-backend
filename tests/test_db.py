@@ -22,8 +22,7 @@ def _say(text):
 
 def test_schema_version_set(dbpath):
     db = DB(dbpath)
-    v = db._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert v == SCHEMA_VERSION
+    assert db.get_meta("schema_version") == str(SCHEMA_VERSION)
 
 
 def test_meta_round_trip(dbpath):

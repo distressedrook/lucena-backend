@@ -7,7 +7,9 @@ name = "lucena-backend"
 version = "0.1.0"
 description = "Lucena backend — orchestrator + state machine + LLM adapter (closed)"
 requires-python = ">=3.10"
-dependencies = []          # lucena-engine is installed from the sibling engine/ (editable)
+dependencies = [
+    "psycopg[binary]>=3.2",   # Postgres durable store
+]                             # lucena-engine is installed from the sibling engine/ (editable)
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "python-chess>=1.10"]   # tests/tooling only
