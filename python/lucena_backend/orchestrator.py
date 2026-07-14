@@ -164,8 +164,26 @@ class Orchestrator:
         self.store = store          # StateStore
         self.engine = engine        # EngineClient (gRPC)
         self.model = model
+        self.rating = int(os.environ.get("LUCENA_RATING", "1500"))   # player level for Maia traps
         self._llm: LLMAdapter = llm or make_adapter({"provider": "gemini", "default_model": model})
         self._last_tokens: dict | None = None
+
+    async def _arm_poisoned(self, fen: str | None) -> None:
+        """Run Maia poisoned-line detection for `fen` and arm/clear the board's trap slot, then
+        re-publish the board so `has_poisoned_line` projects. No-op / clears if Maia is unavailable."""
+        if not fen:
+            return
+        try:
+            res = await asyncio.to_thread(self.engine.poisoned_line, fen, self.rating)
+        except Exception:  # noqa: BLE001 — Maia unavailable / detection failure -> just no trap
+            self.store.clear_poisoned(fen)
+            return
+        if res.get("has_poisoned_line") and res.get("poisoned_line"):
+            self.store.set_poisoned(fen, res["poisoned_line"],
+                                    meta={"fatal": res.get("fatal"), "idea": res.get("idea")})
+            self.store.write_board(fen)   # re-project the board so has_poisoned_line publishes
+        else:
+            self.store.clear_poisoned(fen)
 
     async def run_turn(self, session_id: str, text: str | None = None) -> dict:
         self.store.read_input()                     # consume the mailbox (parity)
@@ -181,6 +199,7 @@ class Orchestrator:
                 self.store.write_board(detected[-1])
                 # A pasted position starts a fresh line — the board orientation anchors on it.
                 self.store.write_history([{"n": 0, "san": "", "uci": "", "fen": detected[-1]}])
+                await self._arm_poisoned(detected[-1])   # is there a trap here for this player?
             fen = self.store.board_view
             if self.store._gate_awaiting:           # mid-probe -> grade the answer
                 return await self._probe_answer(fen, text)
@@ -225,6 +244,7 @@ class Orchestrator:
         try:
             verdict = await asyncio.to_thread(self.engine.evaluate, fen_before, [uci])
             after = self.store.board_view
+            await self._arm_poisoned(after)   # trap in the resulting position?
             facts = await asyncio.to_thread(self.engine.analyze, after) if after else {}
             san = verdict.get("san") or uci
             # PERSPECTIVE: the player is whoever was to move BEFORE the move; after it, it's the

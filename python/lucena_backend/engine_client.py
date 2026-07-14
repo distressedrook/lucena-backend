@@ -66,5 +66,16 @@ class EngineClient:
     def get_info(self) -> dict:
         return _d(self.truth.GetInfo(pb.Empty()))
 
+    # -- behaviour (Maia) --------------------------------------------------
+    def poisoned_line(self, fen: str, rating: int = 1500) -> dict:
+        """A trap at this position a `rating`-level human would fall for (Maia + Stockfish).
+        Raises if Maia is unavailable — callers treat that as 'no trap'."""
+        r = self.behaviour.PoisonedLine(pb.PoisonedLineReq(fen=fen, rating=rating))
+        return {
+            "has_poisoned_line": r.has_poisoned_line,
+            "poisoned_line": [{"san": s.san, "fen": s.fen} for s in r.poisoned_line],
+            "fatal": r.fatal, "idea": r.idea,
+        }
+
     def close(self) -> None:
         self._channel.close()
