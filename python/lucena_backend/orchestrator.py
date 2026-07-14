@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 
 from .llm import make_adapter, Message, GenerateOptions, LLMAdapter
 
@@ -33,6 +34,8 @@ _COACH_SYSTEM = (
     "move, says 'just tell me', 'show me the move', 'what should I play'). Then explain directly, "
     "naming the move and the reason.\n"
     "Ground EVERY claim only in the facts provided — never invent a piece, square, line, or number. "
+    "THE PIECE ROSTER is the COMPLETE and ONLY truth about where pieces are: every piece and square you "
+    "name MUST appear in it exactly; if a piece is not in the roster, it does not exist. "
     "Translate evaluations into plain words ('you're winning', 'roughly equal') — never cite win% or "
     "centipawns.\n"
     "PERSPECTIVE (critical — getting it backwards ruins the read): address the player as 'you'; they "
@@ -61,8 +64,10 @@ _MOVE_SYSTEM = (
     "verdict), give the one key reason, then point toward what to do NEXT — a nudge, not the full "
     "answer. Ground everything ONLY in the facts — never invent a piece, square, line, or number; "
     "translate evals into plain words. PERSPECTIVE: address the player as 'you' (they made the move); "
-    "the opponent is the other colour, and threats belong to the opponent. Warm and direct. Return "
-    "JSON: {\"text\": string}."
+    "the opponent is the other colour, and threats belong to the opponent. Warm and direct. "
+    "THE PIECE ROSTER in the fact sheet is the COMPLETE and ONLY truth about where pieces are: every "
+    "piece and square you name MUST appear in it exactly; if a piece is not in the roster, it does not "
+    "exist — never invent one or move one to a square it isn't on. Return JSON: {\"text\": string}."
 )
 
 
@@ -105,16 +110,24 @@ def _ground(facts: dict) -> str:
 
 
 def _ground_move(verdict: dict) -> str:
-    """Compact grounding for a move the player made — its class, Δwin%, the best move, refutation."""
-    out = [f"Move played: {verdict.get('san')}",
-           f"Class: {verdict.get('class')} (glyph {verdict.get('glyph') or '—'})",
+    """Compact grounding for a move the player made. The engine's CLASS is authoritative — a 'best'/
+    'ok'/'only_move' move is GOOD (say so); only a dubious/mistake/blunder is a mistake. Only surface
+    a better move / refutation when the move was actually worse than best, so an innocent move is never
+    dressed up as punishable."""
+    played = verdict.get("san")
+    cls = verdict.get("class")
+    is_mistake = cls in ("dubious", "mistake", "blunder")
+    out = [f"Move played: {played}",
+           f"Engine class: {cls} — AUTHORITATIVE, do not re-judge "
+           f"({'a mistake' if is_mistake else 'a good move — treat it as good'})",
            f"Change in win%: {verdict.get('delta_win_pct')}"]
-    if (best := verdict.get("best") or {}).get("san"):
-        out.append(f"Best move instead: {best['san']} ({' '.join(best.get('pv_san') or [])})")
-    if ref := verdict.get("refutation_pv") or []:
-        out.append(f"Refutation of the played move: {' '.join(ref)}")
+    best = verdict.get("best") or {}
+    if is_mistake and best.get("san") and best["san"] != played:
+        out.append(f"A better move was: {best['san']} ({' '.join(best.get('pv_san') or [])})")
+    if is_mistake and (ref := verdict.get("refutation_pv") or []):
+        out.append(f"How the opponent punishes it: {' '.join(ref)}")
     if cap := verdict.get("captured"):
-        out.append(f"It captured: {cap}")
+        out.append(f"The move captured a {cap}")
     return "\n".join(out)
 
 
@@ -222,10 +235,15 @@ class Orchestrator:
     # -- generation ----------------------------------------------------------
 
     async def _gen_json(self, system: str, prompt: str) -> dict:
+        if os.environ.get("LUCENA_DEBUG_PROMPT"):
+            print(f"\n===== LLM PROMPT =====\n--- SYSTEM ---\n{system}\n\n--- USER ---\n{prompt}\n"
+                  f"======================", flush=True)
         comp = await self._llm.generate(
             [Message("system", system), Message("user", prompt)],
             GenerateOptions(model=self.model, schema=_JSON_OBJECT, max_tokens=400, temperature=0.4),
         )
+        if os.environ.get("LUCENA_DEBUG_PROMPT"):
+            print(f"--- RESPONSE ---\n{comp.text}\n======================", flush=True)
         self._stash_tokens(comp.usage)
         return comp.json or {}
 
