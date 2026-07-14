@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import json
 
+from .llm import make_adapter, Message, GenerateOptions, LLMAdapter
+
 _SYSTEM = (
     "You are a chess coach explaining ONE move to a student in 1-2 short sentences. "
     "Ground everything ONLY in the engine facts you are given — never invent a piece, "
@@ -24,24 +26,10 @@ _SYSTEM = (
 
 
 class QuickCoach:
-    def __init__(self, *, mcp_url: str, model: str):
-        from google import genai
-        from google.genai import types
-
+    def __init__(self, *, mcp_url: str, model: str, llm: LLMAdapter | None = None):
         self.mcp_url = mcp_url
         self.model = model
-        self._genai = genai
-        self._types = types
-        self._client = None   # built lazily on first use (Client() needs the key at construction)
-
-    def _get_client(self):
-        if self._client is None:
-            # one-shot client with the same backoff the agent uses (free-tier RPM/TPM)
-            self._client = self._genai.Client(http_options=self._types.HttpOptions(
-                retry_options=self._types.HttpRetryOptions(
-                    attempts=8, initial_delay=2.0, max_delay=60.0, exp_base=2.0,
-                    jitter=1.0, http_status_codes=[429, 503])))
-        return self._client
+        self._llm: LLMAdapter = llm or make_adapter({"provider": "gemini", "default_model": model})
 
     async def explain(self, *, session_id: str, fen: str, move: str | None = None,
                       correct: bool | None = None) -> dict:
@@ -88,11 +76,11 @@ class QuickCoach:
         )
 
     async def _generate(self, prompt: str) -> str:
-        cfg = self._types.GenerateContentConfig(
-            system_instruction=_SYSTEM, max_output_tokens=200, temperature=0.4)
-        resp = await self._get_client().aio.models.generate_content(
-            model=self.model, contents=prompt, config=cfg)
-        return (resp.text or "").strip()
+        comp = await self._llm.generate(
+            [Message("system", _SYSTEM), Message("user", prompt)],
+            GenerateOptions(model=self.model, max_tokens=200, temperature=0.4),
+        )
+        return comp.text
 
     async def aclose(self) -> None:
         pass

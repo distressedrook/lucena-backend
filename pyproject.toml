@@ -11,6 +11,7 @@ dependencies = []          # lucena-engine is installed from the sibling engine/
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "python-chess>=1.10"]   # tests/tooling only
+gemini = ["google-genai>=1.0"]                # the GeminiAdapter provider (lazy-imported)
 
 [tool.setuptools]
 package-dir = {"" = "python"}

@@ -17,6 +17,11 @@ from __future__ import annotations
 
 import json
 
+from .llm import make_adapter, Message, GenerateOptions, LLMAdapter
+
+# JSON-mode flows return a small object; a permissive schema just triggers JSON output.
+_JSON_OBJECT = {"type": "object"}
+
 _COACH_SYSTEM = (
     "You are a chess coach speaking to one player. You are given the engine's grounded read of the "
     "CURRENT position, the player's message, and the engine's best move. DECIDE how to respond:\n"
@@ -49,25 +54,13 @@ _GRADE_SYSTEM = (
 
 
 class Orchestrator:
-    def __init__(self, *, mcp_url: str, model: str, fallback=None):
-        from google import genai
-        from google.genai import types
-
+    def __init__(self, *, mcp_url: str, model: str, llm: LLMAdapter | None = None, fallback=None):
         self.mcp_url = mcp_url
         self.model = model
         self.fallback = fallback
-        self._genai = genai
-        self._types = types
-        self._client = None
+        # Depend only on the generic interface; provider + model are config.
+        self._llm: LLMAdapter = llm or make_adapter({"provider": "gemini", "default_model": model})
         self._last_tokens: dict | None = None
-
-    def _get_client(self):
-        if self._client is None:
-            self._client = self._genai.Client(http_options=self._types.HttpOptions(
-                retry_options=self._types.HttpRetryOptions(
-                    attempts=3, initial_delay=1.0, max_delay=8.0, exp_base=2.0,
-                    jitter=1.0, http_status_codes=[429, 503])))
-        return self._client
 
     async def run_turn(self, session_id: str, text: str | None = None) -> dict:
         from mcp import ClientSession
@@ -159,23 +152,16 @@ class Orchestrator:
     # -- generation ----------------------------------------------------------
 
     async def _gen_json(self, system: str, prompt: str) -> dict:
-        cfg = self._types.GenerateContentConfig(
-            system_instruction=system, max_output_tokens=400, temperature=0.4,
-            response_mime_type="application/json")
-        resp = await self._get_client().aio.models.generate_content(
-            model=self.model, contents=prompt, config=cfg)
-        self._stash_tokens(resp)
-        try:
-            return json.loads(resp.text or "{}")
-        except (ValueError, TypeError):
-            return {}
+        comp = await self._llm.generate(
+            [Message("system", system), Message("user", prompt)],
+            GenerateOptions(model=self.model, schema=_JSON_OBJECT, max_tokens=400, temperature=0.4),
+        )
+        self._stash_tokens(comp.usage)
+        return comp.json or {}
 
-    def _stash_tokens(self, resp) -> None:
-        um = getattr(resp, "usage_metadata", None)
-        self._last_tokens = ({"input": getattr(um, "prompt_token_count", None),
-                              "output": getattr(um, "candidates_token_count", None),
-                              "total": getattr(um, "total_token_count", None)}
-                             if um is not None else None)
+    def _stash_tokens(self, usage) -> None:
+        self._last_tokens = ({"input": usage.input_tokens, "output": usage.output_tokens,
+                              "total": usage.total_tokens} if usage is not None else None)
 
     async def aclose(self) -> None:
         if self.fallback is not None:
