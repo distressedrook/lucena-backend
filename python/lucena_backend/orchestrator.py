@@ -77,6 +77,47 @@ def _ask_beat(text: str, hints: list[str] | None = None) -> dict:
     return b
 
 
+def _ground(facts: dict) -> str:
+    """A COMPACT, COMPLETE fact sheet for the prompt — the exact piece roster, material standing,
+    eval-in-words, top lines, and tactical facts. Never a truncated JSON dump (that fed the model a
+    broken blob and it hallucinated pieces). Everything the coach may claim is in here."""
+    if not facts:
+        return "(no position on the board yet)"
+    pieces = facts.get("pieces") or []
+    white = ",".join(sorted(p.get("piece", "") + p.get("square", "")
+                            for p in pieces if p.get("color") == "white"))
+    black = ",".join(sorted(p.get("piece", "") + p.get("square", "")
+                            for p in pieces if p.get("color") == "black"))
+    out = [f"Side to move: {facts.get('side_to_move', '?')}",
+           f"White pieces: {white}", f"Black pieces: {black}"]
+    if (m := facts.get("material") or {}).get("standing"):
+        out.append(f"Material: {m['standing']}")
+    if (e := facts.get("eval") or {}):
+        out.append(f"Eval: win% {e.get('win_pct')} for the side to move")
+    for ln in (facts.get("lines") or [])[:2]:
+        if pv := " ".join(ln.get("pv_san") or []):
+            out.append(f"Best line #{ln.get('rank')}: {pv}")
+    if tac := facts.get("facts") or []:
+        out.append("Tactical facts (the ONLY tactics you may cite):")
+        for f in tac[:5]:
+            out.append(f"  - {f.get('text')} [{f.get('kind')} @ {','.join(f.get('squares') or [])}]")
+    return "\n".join(out)
+
+
+def _ground_move(verdict: dict) -> str:
+    """Compact grounding for a move the player made — its class, Δwin%, the best move, refutation."""
+    out = [f"Move played: {verdict.get('san')}",
+           f"Class: {verdict.get('class')} (glyph {verdict.get('glyph') or '—'})",
+           f"Change in win%: {verdict.get('delta_win_pct')}"]
+    if (best := verdict.get("best") or {}).get("san"):
+        out.append(f"Best move instead: {best['san']} ({' '.join(best.get('pv_san') or [])})")
+    if ref := verdict.get("refutation_pv") or []:
+        out.append(f"Refutation of the played move: {' '.join(ref)}")
+    if cap := verdict.get("captured"):
+        out.append(f"It captured: {cap}")
+    return "\n".join(out)
+
+
 class Orchestrator:
     """The deterministic coaching pipeline. Depends only on: the state machine (in-process),
     the engine gRPC client (grounding), and the LLM adapter (generation). No MCP, no engine
@@ -128,7 +169,7 @@ class Orchestrator:
             f"You are coaching the player, who is playing {you} (the side to move). Their opponent is "
             f"{opp}. Every threat/attack/plan belongs to {opp}, never to the player.\n\n"
             f"Player said: {text}\n\nEngine's grounded read (coach ONLY from this):\n"
-            f"{json.dumps(facts)[:2000]}\n"
+            f"{_ground(facts)}\n"
             f"Best move (reveal ONLY in a 'tell'): {best}\n\nRespond as JSON.")
         mode = (out.get("mode") or "ask").lower()
         body = out.get("text") or "Let's take a look at this position together."
@@ -152,10 +193,9 @@ class Orchestrator:
             out = await self._gen_json(
                 _MOVE_SYSTEM,
                 f"The player just played: {san}\n"
-                f"Engine verdict on that move (class/glyph/Δwin%/best/refutation):\n"
-                f"{json.dumps(verdict)[:1500]}\n"
+                f"Engine verdict on that move:\n{_ground_move(verdict)}\n\n"
                 f"The resulting position — the fact sheet to guide the NEXT step:\n"
-                f"{json.dumps(facts)[:1500]}\n\nReact as JSON.")
+                f"{_ground(facts)}\n\nReact as JSON.")
             body = out.get("text") or f"You played {san}."
             tone = "praise" if str(verdict.get("class")) in ("best", "ok", "only_move", "brilliant") else "correct"
             self.store.append_beats([_say_beat(body, tone=tone)])
@@ -170,7 +210,7 @@ class Orchestrator:
         verdict = await self._gen_json(
             _GRADE_SYSTEM,
             f"Player's answer: {text}\n\nEngine's grounded analysis (grade ONLY against this):\n"
-            f"{json.dumps(facts)[:2000]}\n\nGrade and give feedback as JSON.")
+            f"{_ground(facts)}\n\nGrade and give feedback as JSON.")
         correct = bool(verdict.get("correct"))
         feedback = verdict.get("feedback") or "Let's look at that together."
         self.store.append_beats([_say_beat(feedback, tone="praise" if correct else "correct")])
