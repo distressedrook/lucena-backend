@@ -105,6 +105,20 @@ def build_app(*, home: str, engine=None, llm=None, model: str = _DEFAULT_MODEL,
             return JSONResponse({"error": "bad_session"}, status_code=400)
         return {"session_id": await asyncio.to_thread(_locked, store.write_session_id, sid)}
 
+    @app.post("/move")
+    async def move(body: dict):
+        """Freeform move: apply it (engine) and publish the new board so it sticks. (Drill
+        adjudication — correct/wrong/finished — is the follow-up; this returns a non-drill result.)"""
+        uci, fen = body.get("uci"), body.get("fen")
+        if not (uci and fen):
+            return JSONResponse({"error": "bad_move"}, status_code=400)
+        try:
+            new_fen = await asyncio.to_thread(eng.apply, fen, uci)
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"error": "illegal_move", "detail": str(e)}, status_code=400)
+        await asyncio.to_thread(_locked, store.write_board, new_fen)
+        return {}   # non-drill → the app lets the (freshly published) live board take over
+
     @app.get("/config")
     async def config():
         return {"model": model, "engine": engine_target}

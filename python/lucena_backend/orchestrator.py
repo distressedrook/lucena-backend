@@ -82,15 +82,19 @@ class Orchestrator:
         if not (text and text.strip()):
             return {"ok": True, "orchestrated": False, "flow": "unhandled"}
         text = text.strip()
-        # Deterministic: the LLM NEVER sets the board (it hallucinates). A pasted FEN is detected by
-        # the engine and set here — write_board publishes the new position, so the app re-renders.
-        detected = await asyncio.to_thread(self.engine.detect_fens, text)
-        if detected:
-            self.store.write_board(detected[-1])
-        fen = self.store.board_view
-        if self.store._gate_awaiting:               # mid-probe -> grade the answer
-            return await self._probe_answer(fen, text)
-        return await self._coach(fen, text)
+        self.store.publish_status("Thinking…")      # coach-working signal (drives the app halo)
+        try:
+            # Deterministic: the LLM NEVER sets the board (it hallucinates). A pasted FEN is detected
+            # by the engine and set here — write_board publishes the new position, so the app re-renders.
+            detected = await asyncio.to_thread(self.engine.detect_fens, text)
+            if detected:
+                self.store.write_board(detected[-1])
+            fen = self.store.board_view
+            if self.store._gate_awaiting:           # mid-probe -> grade the answer
+                return await self._probe_answer(fen, text)
+            return await self._coach(fen, text)
+        finally:
+            self.store.publish_status(None)         # clear it AFTER the beat is pushed
 
     # -- flows ---------------------------------------------------------------
 

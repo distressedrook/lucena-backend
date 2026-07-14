@@ -91,6 +91,54 @@ def test_pasted_fen_sets_the_board(tmp_path, engine_server):
 
 
 @requires_engine
+def test_move_updates_and_publishes_the_board(tmp_path, engine_server):
+    """A freeform /move applies the move (engine) and publishes the new board — so the piece the
+    player moved sticks instead of snapping back to the server's stale board."""
+    from fastapi.testclient import TestClient
+
+    app = build_app(home=str(tmp_path), engine=EngineClient(engine_server),
+                    llm=_StubLLM({"mode": "tell", "text": "ok"}), model="stub")
+    client = TestClient(app)
+    with client.websocket_connect("/ws") as ws:
+        while ws.receive_json()["type"] != "ready":
+            pass
+        # POST a move (as the app's CoachBridge.playMove does) — e2e4 from the start.
+        r = client.post("/move", json={"uci": "e2e4", "fen": STARTPOS})
+        assert r.status_code == 200
+        board = None
+        for _ in range(20):
+            m = ws.receive_json()
+            if m["type"] == "board" and m.get("fen"):
+                board = m
+                break
+        assert board is not None, "no board event after /move"
+        assert board["fen"].split()[0] == "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR"
+
+
+@requires_engine
+def test_turn_publishes_working_status(tmp_path, engine_server):
+    """The turn holds a `status` up (drives the app halo) — a status event with text arrives."""
+    from fastapi.testclient import TestClient
+
+    app = build_app(home=str(tmp_path), engine=EngineClient(engine_server),
+                    llm=_StubLLM({"mode": "tell", "text": "ok"}), model="stub")
+    client = TestClient(app)
+    with client.websocket_connect("/ws") as ws:
+        while ws.receive_json()["type"] != "ready":
+            pass
+        ws.send_json({"type": "position", "fen": STARTPOS})
+        ws.send_json({"type": "turn", "text": "hello"})
+        saw_status = False
+        for _ in range(30):
+            m = ws.receive_json()
+            if m["type"] == "status" and m.get("text"):
+                saw_status = True
+            if m["type"] == "beats" and m.get("appended"):
+                break
+        assert saw_status, "no coach-working status published during the turn"
+
+
+@requires_engine
 def test_explain_end_to_end(tmp_path, engine_server):
     from fastapi.testclient import TestClient
 

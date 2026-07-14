@@ -48,6 +48,10 @@ class EngineClient:
         """Legal FENs embedded in free text (deterministic — the LLM never sets the board)."""
         return list(self.truth.DetectFens(pb.TextReq(text=text)).fens)
 
+    def apply(self, fen: str, move: str) -> str:
+        """fen + move (SAN or UCI — the board core accepts both) -> the resulting fen."""
+        return self.truth.Apply(pb.ApplyReq(fen=fen, move=move)).fen
+
     def validate_fen(self, fen: str) -> dict:
         r = self.truth.ValidateFen(pb.Position(fen=fen))
         return {"legal": r.legal, "side_to_move": r.side_to_move, "error": r.error}
