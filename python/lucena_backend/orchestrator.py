@@ -34,8 +34,6 @@ _COACH_SYSTEM = (
     "move, says 'just tell me', 'show me the move', 'what should I play'). Then explain directly, "
     "naming the move and the reason.\n"
     "Ground EVERY claim only in the facts provided — never invent a piece, square, line, or number. "
-    "THE PIECE ROSTER is the COMPLETE and ONLY truth about where pieces are: every piece and square you "
-    "name MUST appear in it exactly; if a piece is not in the roster, it does not exist. "
     "Translate evaluations into plain words ('you're winning', 'roughly equal') — never cite win% or "
     "centipawns.\n"
     "PERSPECTIVE (critical — getting it backwards ruins the read): address the player as 'you'; they "
