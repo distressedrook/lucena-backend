@@ -44,6 +44,10 @@ class EngineClient:
         req = pb.EvaluateReq(fen=fen, moves=list(moves), limit=_limit(nodes, movetime_ms))
         return _d(self.truth.Evaluate(req))
 
+    def detect_fens(self, text: str) -> list[str]:
+        """Legal FENs embedded in free text (deterministic — the LLM never sets the board)."""
+        return list(self.truth.DetectFens(pb.TextReq(text=text)).fens)
+
     def validate_fen(self, fen: str) -> dict:
         r = self.truth.ValidateFen(pb.Position(fen=fen))
         return {"legal": r.legal, "side_to_move": r.side_to_move, "error": r.error}

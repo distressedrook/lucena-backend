@@ -67,6 +67,30 @@ def test_coaching_turn_end_to_end(tmp_path, engine_server):
 
 
 @requires_engine
+def test_pasted_fen_sets_the_board(tmp_path, engine_server):
+    """A FEN in the player's message is DETECTED (deterministic) and set as the board — the app
+    gets a `board` event with the pasted position. The LLM never sets the board."""
+    from fastapi.testclient import TestClient
+
+    tactical = "r1bqkbnr/pppp1ppp/2n5/1B2p3/4P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 3 3"
+    app = build_app(home=str(tmp_path), engine=EngineClient(engine_server),
+                    llm=_StubLLM({"mode": "tell", "text": "Interesting position."}), model="stub")
+    client = TestClient(app)
+    with client.websocket_connect("/ws") as ws:
+        while ws.receive_json()["type"] != "ready":
+            pass
+        ws.send_json({"type": "turn", "text": f"what do you think about {tactical}"})
+        board = None
+        for _ in range(30):
+            m = ws.receive_json()
+            if m["type"] == "board" and m.get("fen"):
+                board = m
+                break
+        assert board is not None, "no board event — the pasted FEN was not set"
+        assert board["fen"].startswith("r1bqkbnr/pppp1ppp/2n5/1B2p3"), board["fen"]
+
+
+@requires_engine
 def test_explain_end_to_end(tmp_path, engine_server):
     from fastapi.testclient import TestClient
 
