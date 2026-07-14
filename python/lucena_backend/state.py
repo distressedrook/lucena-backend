@@ -609,7 +609,10 @@ class StateStore:
         return os.path.join(self.home, "session.json")
 
     def read_session_id(self) -> str | None:
-        """The stored session id for this home, or None if never set."""
+        """The current session id — the one `is_active` row in the DB (B3: no more session.json).
+        Falls back to the legacy file only when there is no DB (in-memory mode)."""
+        if self.db is not None:
+            return self.db.get_active_session()
         try:
             with open(self._session_path(), encoding="utf-8") as f:
                 return (json.load(f) or {}).get("session_id") or None
@@ -620,10 +623,11 @@ class StateStore:
         """Persist the coach session id (single-writer, atomic) and make it the current live view.
         Returns it."""
         self._session_seq += 1
-        write_state(self._session_path(), {
-            "schema": SCHEMA, "seq": self._session_seq, "session_id": session_id,
-        })
-        self._switch_current(session_id)
+        if self.db is None:                       # in-memory mode keeps the legacy file
+            write_state(self._session_path(), {
+                "schema": SCHEMA, "seq": self._session_seq, "session_id": session_id,
+            })
+        self._switch_current(session_id)          # sets the DB is_active flag when there is a DB
         return session_id
 
     def ensure_session_id(self) -> str:
@@ -652,6 +656,7 @@ class StateStore:
             # Record the session so it shows in the rail immediately (named), before Claude has
             # written any transcript — its beats are already tied to it in the DB.
             self.db.upsert_session(sid, DEFAULT_SESSION_NAME, time.time())
+            self.db.set_active_session(sid)       # the current-session pointer (replaces session.json)
             # Switching sessions is an explicit event (off the event loop, under the tool lock) — a fine
             # place to cache any freshly-available transcript titles into the DB, so the rail we're about
             # to publish shows nice names. The snapshot's own read (_sessions_payload) stays pure.
