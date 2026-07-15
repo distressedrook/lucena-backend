@@ -159,6 +159,11 @@ class DB:
             self._ex("UPDATE session SET name=%s WHERE id=%s", (name, session_id))
             self._conn.commit()
 
+    def get_session_name(self, session_id: str) -> str | None:
+        with self._lock:
+            row = self._ex("SELECT name FROM session WHERE id=%s", (session_id,)).fetchone()
+            return row[0] if row else None
+
     def set_session_status(self, session_id: str, status: str) -> None:
         with self._lock:
             self._ex("UPDATE session SET status=%s WHERE id=%s", (status, session_id))

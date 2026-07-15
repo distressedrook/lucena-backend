@@ -59,9 +59,11 @@ def test_coaching_turn_end_to_end(tmp_path, engine_server):
         for _ in range(30):
             m = ws.receive_json()
             if m["type"] == "beats" and m.get("appended"):
-                beat = m
-                break
-        assert beat is not None, "no beats streamed back"
+                coach = [b for b in m["appended"] if b.get("kind") != "you"]  # skip the echoed player msg
+                if coach:
+                    beat = {"appended": coach}
+                    break
+        assert beat is not None, "no coach beat streamed back"
         texts = [seg["text"] for b in beat["appended"] for seg in b.get("segments", [])]
         assert any("developing your pieces" in t for t in texts), texts
 
@@ -141,7 +143,8 @@ def test_turn_publishes_working_status(tmp_path, engine_server):
             m = ws.receive_json()
             if m["type"] == "status" and m.get("text"):
                 saw_status = True
-            if m["type"] == "beats" and m.get("appended"):
+            # stop at the COACH beat, not the player's echoed message bubble
+            if m["type"] == "beats" and any(b.get("kind") != "you" for b in m.get("appended", [])):
                 break
         assert saw_status, "no coach-working status published during the turn"
 

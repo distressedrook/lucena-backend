@@ -96,10 +96,21 @@ def _captured_piece(fen: str, uci: str) -> str | None:
         return None
 
 
-def _you_beat(text: str) -> dict:
+def _you_beat(text: str, *, correct: bool | None = None,
+              move: str | None = None, fen: str | None = None) -> dict:
     """A player-turn beat — the player's own words (or 'Played <move>' for a board move) shown as a
-    right-aligned bubble, so the beats column reads as a conversation, not a coach monologue."""
-    return {"kind": "you", "stops": False, "segments": [{"text": text}]}
+    right-aligned bubble, so the beats column reads as a conversation, not a coach monologue. On a
+    DRILL move, `correct` marks the bubble with a verdict badge (green check / red cross) instead of a
+    separate feedback beat; None (freeform / typed text) shows no badge. `move` (SAN) + `fen` (the
+    position right after the move) make the move a clickable chip that snaps the board there."""
+    beat: dict = {"kind": "you", "stops": False, "segments": [{"text": text}]}
+    if correct is not None:
+        beat["correct"] = bool(correct)
+    if move:
+        beat["move"] = move
+    if fen:
+        beat["fen"] = fen
+    return beat
 
 # Point-of-action reminder stamped on every "here's the position" result. A tool
 # call cannot be structurally forced, so this is the strongest guard available:
@@ -1553,6 +1564,10 @@ class ToolContext:
             except Exception as e:
                 return R.error("illegal_fen", str(e))
             seq = self.store.write_board(fen)
+            # A pasted position is a NEW game — reset the move line to just this position (ply 0), so a
+            # stale move list from a prior game can't linger and disagree with the board (single source
+            # of truth: board and history describe the same game).
+            self.store.write_history([{"n": 0, "san": None, "uci": None, "fen": fen}])
             return {"found": "fen", "fen": fen, "seq": seq}
         game = detect_pgn(text or "")
         if game is not None:
@@ -1925,7 +1940,7 @@ class ToolContext:
 
     # -- play_move (app pushes a raw move; the MCP adjudicates) ------------
     @_guarded
-    def play_move(self, uci, fen=None) -> dict:
+    def play_move(self, uci, fen=None, *, push_feedback=True) -> dict:
         """The APP pushes a raw played move; the MCP adjudicates it against the active drill (or,
         with no drill, records it for the coach). Server-side it updates the board, pushes the
         deterministic feedback beat + the Maia-grounded move-meaning beat, and records the drill
@@ -1965,9 +1980,13 @@ class ToolContext:
                         {"n": 0, "san": None, "uci": None, "fen": pre}]
                     plies.append({"n": len(plies), "san": san, "uci": uci, "fen": after})
                     self.store.append_beats([_you_beat(
-                        f"Played {san}" + (f" — takes the {c}" if (c := _captured_piece(pre, uci)) else ""))])
-                    self.store.write_board(after)
+                        f"Played {san}" + (f" — takes the {c}" if (c := _captured_piece(pre, uci)) else ""),
+                        move=san, fen=after)])
+                    # History BEFORE board: the app anchors orientation on history.first, so writing the
+                    # board first (a black-to-move position) would flip the board upside-down for a frame
+                    # on the first move (empty history) before history corrects it.
                     self.store.write_history(plies)
+                    self.store.write_board(after)
                 except Exception:
                     pass   # an unreplayable move (stale fen) — input already recorded for the coach
             return {"ok": True, "drill": False}
@@ -1983,37 +2002,47 @@ class ToolContext:
         # the coach otherwise guesses — usually "pawn"): "Played Qxf2+ — takes the bishop".
         captured = _captured_piece(pre_fen, uci) if pre_fen else None
         echo = f"Played {played}" + (f" — takes the {captured}" if captured else "")
-        self.store.append_beats([_you_beat(echo)])
-        # Then the instant stuff (board, move line, feedback, wrap-up, the coach's event) …
+        # The move bubble carries the verdict as a BADGE (green check / red cross) — no separate
+        # feedback beat. The LLM (coach_move) voices the why + what's next; the badge is the instant
+        # right/wrong signal that used to be a canned beat. `move`/`fen` make the move chip clickable
+        # (snap the board to the position right after it).
+        try:
+            after_player_fen = Board(pre_fen).apply(uci).fen if pre_fen else None
+        except Exception:
+            after_player_fen = None
+        self.store.append_beats([_you_beat(echo, correct=r["correct"], move=played, fen=after_player_fen)])
+        # History BEFORE board (orientation anchors on history.first — board-first would flip the board
+        # for a frame on the opening move).
+        self.store.write_history(r["plies"])
         if r.get("board"):
             self.store.write_board(r["board"])
-        self.store.write_history(r["plies"])
-        self.store.append_beats([r["feedback"]])
-        if r.get("extra"):
-            self.store.append_beats([r["extra"]])
-        # Solved a drill that hid a trap → deterministically nudge the player to explore it now (not left
-        # to the coach, which may stay quiet). Read it straight from the drill's tree — `has_poisoned_line`
-        # is set deterministically at build time and durable on the document; no separate latch.
-        if r["finished"] and (self.store._last_tree or {}).get("has_poisoned_line"):
-            self.store.append_beats([{
-                "kind": "say", "stops": False, "tone": "teach",
-                "segments": [{"text": "There's a poisoned line in this position — a move that looks winning "
-                                      "but loses. Ask me to show you the line you sidestepped."}],
-            }])
+        # Legacy canned verdict beat — only when the caller isn't LLM-coaching this move (push_feedback).
+        if push_feedback:
+            self.store.append_beats([r["feedback"]])
+            if r.get("extra"):
+                self.store.append_beats([r["extra"]])
+            # Legacy deterministic poisoned-line nudge. On the LLM path (push_feedback=False) the coach
+            # surfaces the trap in its own voice on solve (coach_move), so no template beat here.
+            if r["finished"] and (self.store._last_tree or {}).get("has_poisoned_line"):
+                self.store.append_beats([{
+                    "kind": "say", "stops": False, "tone": "teach",
+                    "segments": [{"text": "There's a poisoned line in this position — a move that looks "
+                                          "winning but loses. Ask me to show you the line you sidestepped."}],
+                }])
         self.store.set_input(r["event"])
         # DETERMINISTIC loop-close: the drill is solved and we know exactly what happened — bank the
-        # mastery observation + drop a one-shot "concluded" note here, at the source, rather than leaving
-        # it to the coach (which loses the drill_solved event if the player pivots, then re-praises the
-        # old drill from memory on the next turn). The verdict beat is already posted above.
+        # mastery observation + drop a one-shot 'concluded' note (read_input hands it to the coach once).
         if r["finished"]:
             self._close_drill(drill)
-        # … then the Maia move-meaning (a slower engine call), appended after.
+        # The Maia move-meaning ('a common blunder at your level' etc.) is now returned, NOT pushed as
+        # its own local beat — the LLM (coach_move) folds it into its grounded voice.
         meaning = self._move_meaning(pre_fen, uci)
-        if meaning:
+        if push_feedback and meaning:
             self.store.append_beats([{"kind": "say", "stops": False, "tone": "teach",
                                       "segments": [{"text": meaning}]}])
         self.store.set_drill_state(drill.to_state())   # persist walker progress (P2c) — survives restart
-        return {"ok": True, "drill": True, "correct": r["correct"], "finished": r["finished"]}
+        return {"ok": True, "drill": True, "correct": r["correct"], "finished": r["finished"],
+                "meaning": meaning}
 
     def _close_drill(self, drill) -> None:
         """Close the loop on a solved drill DETERMINISTICALLY — no LLM. Banks the mastery observation

@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -37,6 +38,7 @@ def _norm_fen(fen: str) -> str:
 # Placeholder name a session gets the moment it's created — shown in the rail until Claude's
 # ai-title (from the transcript) replaces it.
 DEFAULT_SESSION_NAME = "New session"
+_START_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 
 # board arrow/highlight styles are semantic names the app resolves against the
 # palette — the server never sends hex colors (§5.1).
@@ -232,6 +234,12 @@ class StateStore:
     # nothing leaks across a switch.
     _live: dict = field(default_factory=dict)        # session_id -> _Live
     _current: str = ""                               # current session id; "" until one is set
+    # Serializes the version-bump + publish so concurrent writers (an inline move in a worker thread,
+    # the coach's background beat on the event loop, a still-running arm task) never race the monotonic
+    # `version` — a stale/duplicate version makes the app's ordered-delta guard DROP the event (a
+    # never-cleared "thinking" status or a missed board update = a frozen screen). Re-entrant: nested
+    # persist/publish calls under one mutator are fine.
+    _wlock: object = field(default_factory=threading.RLock)
 
     @property
     def _cur(self) -> _Live:
@@ -307,11 +315,12 @@ class StateStore:
         decomposed columns). Bumps the monotonic `version` (in memory always, so it advances even with
         no DB), then persists the whole document blob. `new_beats` (from append_beats) are written in
         the SAME transaction as the document, so `beats_seq` and the beat rows never disagree."""
-        c = self._cur
-        c.version += 1
-        if self.db is None or not self._current:
-            return
-        self.db.save_document(self._current, self._document_dict(c), c.version, beats=new_beats)
+        with self._wlock:   # atomic bump (int += is read-modify-write; concurrent writers must not tear it)
+            c = self._cur
+            c.version += 1
+            if self.db is None or not self._current:
+                return
+            self.db.save_document(self._current, self._document_dict(c), c.version, beats=new_beats)
 
     @property
     def _beats(self): return self._cur.beats
@@ -635,7 +644,15 @@ class StateStore:
         always fetches a stable id and the coaching thread is resumed, not restarted."""
         sid = self.read_session_id() or self.write_session_id(str(uuid.uuid4()))
         self._switch_current(sid)
+        self._seed_start_board()
         return sid
+
+    def _seed_start_board(self) -> None:
+        """A fresh session (no board yet) gets a PUBLISHED start position, so the app receives a real
+        `board` event and the board is interactive from move one. Without this the app only has the
+        placeholder start (never a `board` event) and locks the board on launch. No-op if a board exists."""
+        if self._last_board is None:
+            self.write_board(_START_FEN)
 
     def _switch_current(self, sid: str) -> None:
         """Point the live view at `sid`'s bundle. On a real change, tell the app to reset and
@@ -707,6 +724,10 @@ class StateStore:
         """The current UI state as `(channel, payload)` events, for replay on (re)connect —
         so a fresh app is fully synced before it starts consuming deltas."""
         evs: list[tuple[str, dict]] = []
+        # History goes out BEFORE the board: the app anchors board orientation on `history.first`, so if
+        # the board arrived first it would briefly flip to the board's side-to-move (a black-to-move
+        # position flashes upside-down) before history corrects it. History first = stable orientation.
+        evs.append(("history", {"schema": SCHEMA, "seq": self._history_seq, "plies": self._history}))
         if self._last_board is not None:
             evs.append(("board", self._last_board))
         evs.append(("beats", {
@@ -717,7 +738,6 @@ class StateStore:
             evs.append(("analysis", self._last_analysis))
         if self._last_tree is not None:
             evs.append(("tree", self._last_tree))
-        evs.append(("history", {"schema": SCHEMA, "seq": self._history_seq, "plies": self._history}))
         # The app's persisted display state — replayed once so a resumed/switched session rebuilds the
         # exact board + variations + cursor it left. Absent when the session never explored, OR when the
         # mainline has diverged under it (a re-import): a view whose main prefix no longer matches the
@@ -767,7 +787,8 @@ class StateStore:
     def publish_status(self, text: str | None) -> None:
         """Push a one-line "what the coach is doing" phase (grounded in the tool it just called),
         or `None` to clear it. Transient — a UI hint, not persisted or replayed."""
-        self._publish("status", {"schema": SCHEMA, "text": text})
+        with self._wlock:   # ordered w.r.t. other publishes, so a `None` clear is never dropped as stale
+            self._publish("status", {"schema": SCHEMA, "text": text})
 
     # -- app->coach input (writer: app via submit_input; reader: read_input) --
     def set_input(self, data: dict) -> None:
@@ -804,6 +825,39 @@ class StateStore:
                 os.remove(self._path(name))
             except FileNotFoundError:
                 pass
+
+    def new_session(self) -> str:
+        """Mint a brand-new session id, make it the active/current one, and return it. The BACKEND owns
+        id creation (the app just adopts what it gets back). write_session_id persists it, sets the DB
+        is_active flag, and switches the live view — which publishes reset + the fresh (empty) snapshot
+        to the app, so 'New session' swaps to a clean slate."""
+        sid = self.write_session_id(str(uuid.uuid4()))
+        self._seed_start_board()   # interactive start board from move one (not a locked placeholder)
+        return sid
+
+    @property
+    def session_name(self) -> str | None:
+        """The current session's display name (from the DB), or None. `DEFAULT_SESSION_NAME` means it
+        hasn't been titled yet — the coach names it on the first substantive turn."""
+        if self.db is None or not self._current:
+            return None
+        return self.db.get_session_name(self._current)
+
+    @property
+    def session_unnamed(self) -> bool:
+        """True when the current session still carries the placeholder title — the cue to have the coach
+        propose a real one on this turn."""
+        return (self.session_name or DEFAULT_SESSION_NAME) == DEFAULT_SESSION_NAME
+
+    def set_session_name(self, name: str) -> None:
+        """Title the current session and push the updated rail live, so the sidebar renames in place.
+        Trimmed + length-capped; a blank name is ignored (keeps the placeholder)."""
+        name = (name or "").strip()[:60]
+        if self.db is None or not self._current or not name:
+            return
+        self.db.set_session_name(self._current, name)
+        with self._wlock:
+            self._publish("sessions", self._sessions_payload())
 
     # -- the durable freeform poisoned line (§6.4) ------------------------
     @property
@@ -865,8 +919,9 @@ class StateStore:
                 nf == _norm_fen((m or {}).get("fen", "")) for m in (self._view.get("line") or []))
             if not on_view_line:
                 self._view = None
-        self._persist_view()
-        self._publish("board", obj)
+        with self._wlock:
+            self._persist_view()
+            self._publish("board", obj)
         return self._board_seq
 
     # -- beats (writer: mcp) ----------------------------------------------
@@ -875,22 +930,23 @@ class StateStore:
 
         Assigns each a global index `i`, returns the assigned indices. `cursor`
         is set to the newest beat; the app paces the reveal from there."""
-        start = len(self._beats)
-        now = time.time()
-        indices = []
-        for offset, beat in enumerate(beats):
-            b = dict(beat)
-            b["i"] = start + offset
-            b["board_seq"] = self._board_seq   # the board this beat describes
-            b["ts"] = now                      # wall-clock, so the app can interleave with user messages
-            self._beats.append(b)
-            indices.append(b["i"])
-        self._beats_seq += 1
-        # Persist the new beats + the document (with the bumped beats_seq) in ONE transaction, so a
-        # crash can't leave beats_seq ahead of the beat rows (or vice-versa).
-        self._persist_view(new_beats=self._beats[start:])
-        self._publish("beats", {"schema": SCHEMA, "seq": self._beats_seq,
-                                "appended": self._beats[start:]})
+        with self._wlock:   # atomic version-bump + publish (see _wlock) — concurrent writers stay ordered
+            start = len(self._beats)
+            now = time.time()
+            indices = []
+            for offset, beat in enumerate(beats):
+                b = dict(beat)
+                b["i"] = start + offset
+                b["board_seq"] = self._board_seq   # the board this beat describes
+                b["ts"] = now                      # wall-clock, so the app can interleave with user messages
+                self._beats.append(b)
+                indices.append(b["i"])
+            self._beats_seq += 1
+            # Persist the new beats + the document (with the bumped beats_seq) in ONE transaction, so a
+            # crash can't leave beats_seq ahead of the beat rows (or vice-versa).
+            self._persist_view(new_beats=self._beats[start:])
+            self._publish("beats", {"schema": SCHEMA, "seq": self._beats_seq,
+                                    "appended": self._beats[start:]})
         return indices
 
     # -- tree.json (writer: mcp) ------------------------------------------
@@ -899,8 +955,9 @@ class StateStore:
         position isn't a single-only-move forcing win — there is nothing for the app to walk, and a
         leftover tree would make it reject every move as wrong."""
         self._last_tree = None
-        self._persist_view()
-        self._publish("tree_cleared", {})
+        with self._wlock:
+            self._persist_view()
+            self._publish("tree_cleared", {})
 
     def write_tree(self, tree: dict) -> int:
         """Write the forcing-line drill tree for the app to walk. Single-writer
@@ -909,8 +966,9 @@ class StateStore:
         self._tree_seq = getattr(self, "_tree_seq", 0) + 1
         obj = {"schema": SCHEMA, "seq": self._tree_seq, **tree}
         self._last_tree = obj
-        self._persist_view()
-        self._publish("tree", obj)
+        with self._wlock:
+            self._persist_view()
+            self._publish("tree", obj)
         return self._tree_seq
 
     # -- move history (writer: mcp) ---------------------------------------
@@ -919,8 +977,9 @@ class StateStore:
         navigator. Single-writer (mcp); `seq` bumps each write so the app re-syncs."""
         self._history_seq += 1
         self._history = list(plies)
-        self._persist_view()
-        self._publish("history", {"schema": SCHEMA, "seq": self._history_seq, "plies": self._history})
+        with self._wlock:
+            self._persist_view()
+            self._publish("history", {"schema": SCHEMA, "seq": self._history_seq, "plies": self._history})
         return self._history_seq
 
     # -- analysis_view.json (writer: mcp) ---------------------------------

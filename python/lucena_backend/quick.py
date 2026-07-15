@@ -27,26 +27,35 @@ _SYSTEM = (
 
 
 class QuickCoach:
-    def __init__(self, *, store, engine, model: str, llm: LLMAdapter | None = None):
-        self.store = store          # StateStore
-        self.engine = engine        # EngineClient (gRPC)
+    def __init__(self, *, ctx, model: str, llm: LLMAdapter | None = None, ground_ctx=None):
+        self.ctx = ctx              # ToolContext (in-process coach)
+        # Read-only grounding on a SEPARATE engine + lock, so "Why?" analysis never blocks a move.
+        self.ground = ground_ctx or ctx
+        self.store = ctx.store      # StateStore
         self.model = model
         self._llm: LLMAdapter = llm or make_adapter({"provider": "gemini", "default_model": model})
 
     async def explain(self, *, session_id: str, fen: str, move: str | None = None,
                       correct: bool | None = None) -> dict:
-        # Ground: a move → its refutation via Evaluate; a bare position → the fact sheet.
-        if move:
-            facts = await asyncio.to_thread(self.engine.evaluate, fen, [move])
-        else:
-            facts = await asyncio.to_thread(self.engine.analyze, fen)
-        prompt = self._prompt(fen, move, correct, facts)
-        text = await self._generate(prompt)
-        self.store.append_beats([{
-            "kind": "say", "tone": "correct" if correct is False else "teach",
-            "segments": [{"text": text}], "stops": False,
-        }])
-        return {"ok": True, "text": text}
+        # Ground: a move → its refutation via evaluate; a bare position → the grounded briefing. Raise
+        # the working halo for the whole call (engine eval + one generation ≈ several seconds) so the
+        # app shows "thinking" instead of appearing frozen; clear it on every exit path.
+        self.store.publish_status("Thinking…")
+        try:
+            if move:
+                facts = await asyncio.to_thread(self.ground.evaluate, fen, [move])
+            else:
+                facts = await asyncio.to_thread(self.ground.analyze_and_show, fen,
+                                                focus="analysis", board_push=False)
+            prompt = self._prompt(fen, move, correct, facts)
+            text = await self._generate(prompt)
+            self.store.append_beats([{
+                "kind": "say", "tone": "correct" if correct is False else "teach",
+                "segments": [{"text": text}], "stops": False,
+            }])
+            return {"ok": True, "text": text}
+        finally:
+            self.store.publish_status(None)
 
     def _prompt(self, fen: str, move: str | None, correct: bool | None, facts: dict) -> str:
         verdict = ("The player just played a move that is WRONG." if correct is False
