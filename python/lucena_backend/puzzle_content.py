@@ -19,7 +19,7 @@ from pathlib import Path
 
 from lucena_engine.board import Board
 
-# Lichess theme token -> domain concept id (coach-home/domain.json). Used both to pick the
+# Lichess theme token -> domain concept id. Used both to pick the
 # `concept_id` build_and_arm_drill banks on solve AND to bias adaptive selection toward the
 # player's weakest concept. A pragmatic hand map; unmatched themes fall through to _DEFAULT_CONCEPT.
 THEME_CONCEPT = {
@@ -77,7 +77,7 @@ _cache: dict = {}
 
 def puzzles_dir() -> Path:
     """The curated-puzzle directory: `$LUCENA_PUZZLES`, else `<repo>/content/puzzles`. The default is
-    absolute (the server runs from coach-home/), resolved from this file's location in the repo."""
+    absolute, resolved from this file's location in the repo."""
     env = os.environ.get("LUCENA_PUZZLES")
     if env:
         return Path(env)
