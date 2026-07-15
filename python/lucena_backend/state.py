@@ -34,6 +34,13 @@ SCHEMA = 1
 # in the LLM must still write to the chat it started in, whatever anyone else has opened meanwhile.
 # Bind it at entry points via `StateStore.bound(sid)`; never assign it directly outside this module.
 _current_sid: contextvars.ContextVar[str] = contextvars.ContextVar("lucena_current_sid", default="")
+
+# The authenticated user for the current execution context (the LOGIN session), bound at the same
+# entry points as the chat. Separate from `_current_sid` on purpose: a user has many chats, so
+# "who is this" and "which chat" are independent facts. None = the pre-accounts / in-memory path,
+# which has exactly one implicit user.
+_current_user: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "lucena_current_user", default=None)
 VERSION = "0.1.0"
 
 
@@ -317,14 +324,35 @@ class StateStore:
             )
         return sid
 
+    @property
+    def current_user(self) -> str | None:
+        """The authenticated user for this context (the login session). None pre-accounts."""
+        return _current_user.get()
+
     @contextmanager
-    def bound(self, sid: str):
-        """Bind `sid` as the current chat for this execution context (and anything it spawns)."""
+    def bound(self, sid: str, *, user_id: str | None = None):
+        """Bind `sid` as the current chat for this execution context (and anything it spawns).
+
+        `user_id` binds the login session too; omit it to keep whatever user is already bound (the
+        common case — the entry point binds the user once, then binds chats under it).
+        """
         token = _current_sid.set(sid)
+        utoken = _current_user.set(user_id) if user_id is not None else None
         try:
             yield self
         finally:
             _current_sid.reset(token)
+            if utoken is not None:
+                _current_user.reset(utoken)
+
+    @contextmanager
+    def as_user(self, user_id: str | None):
+        """Bind the login session for this context, without touching the chat cursor."""
+        token = _current_user.set(user_id)
+        try:
+            yield self
+        finally:
+            _current_user.reset(token)
 
     @property
     def _cur(self) -> _Live:
@@ -710,7 +738,7 @@ class StateStore:
         """The current session id — the one `is_active` row in the DB (B3: no more session.json).
         Falls back to the legacy file only when there is no DB (in-memory mode)."""
         if self.db is not None:
-            return self.db.get_active_session()
+            return self.db.get_active_session(self.current_user)
         try:
             with open(self._session_path(), encoding="utf-8") as f:
                 return (json.load(f) or {}).get("session_id") or None
@@ -759,8 +787,38 @@ class StateStore:
         self._live_for(sid)          # restore this chat's beats/board from the DB if it is cold
         return sid
 
+    def _authorize_chat(self, sid: str) -> None:
+        """Refuse a chat this caller may not touch — BEFORE anything reads or writes it.
+
+        Must run before `bind_current`, not just before the upsert. `bind_current` calls `_live_for`,
+        which loads that chat's document/view out of the DB and caches it in `_live` — so checking
+        later still lets a guessed chat id pull another user's coaching into memory. Authorization has
+        to precede the load, not merely the mutation.
+
+        Existence is distinguished from ownership on purpose:
+          - no such chat  -> allowed; the caller is about to create it under themselves.
+          - owned by me   -> allowed.
+          - owned by someone else -> refused.
+          - EXISTS with no owner (a pre-accounts row) -> refused for an authenticated user. Treating
+            "unowned" as "free to take" would let a real user read and mutate legacy chats; adopting
+            them silently would be worse. They are only reachable by the pre-accounts path itself.
+        """
+        if self.db is None:
+            return                      # in-memory: one implicit user, nothing to guard
+        exists, owner = self.db.session_owner(sid)
+        if not exists:
+            return
+        me = self.current_user
+        if me is None:
+            # Pre-accounts caller: may only touch unowned rows, never a real user's chat.
+            if owner is not None:
+                raise PermissionError(f"chat {sid!r} belongs to a user; this caller is anonymous")
+            return
+        if owner != me:
+            raise PermissionError(f"chat {sid!r} is not owned by user {me!r}")
+
     def _activate(self, sid: str) -> None:
-        """Make `sid` the durable active chat. No publish — see open_chat vs attach_chat."""
+        """Make `sid` the durable active chat FOR THE BOUND USER. No publish — see open_chat."""
         if self.db is None:
             return
         # The active chat has ONE canonical home: the DB's is_active row. We do NOT also stamp a
@@ -768,8 +826,9 @@ class StateStore:
         # for one fact is exactly the drift this design forbids.
         # Record the chat so it shows in the rail immediately (named), before anything has titled it —
         # its beats are already tied to it in the DB.
-        self.db.upsert_session(sid, DEFAULT_SESSION_NAME, time.time())
-        self.db.set_active_session(sid)           # the active-chat pointer (replaces session.json)
+        me = self.current_user
+        self.db.upsert_session(sid, DEFAULT_SESSION_NAME, time.time(), user_id=me)
+        self.db.set_active_session(sid, user_id=me)   # this user's active-chat pointer
         from .sessions import refresh_session_names
         refresh_session_names(self.home, self.db)
 
@@ -784,6 +843,7 @@ class StateStore:
         """
         if not sid:
             return self.current_sid
+        self._authorize_chat(sid)     # BEFORE bind_current — binding LOADS the document
         self.bind_current(sid)
         self._activate(sid)
         return sid
@@ -800,6 +860,7 @@ class StateStore:
         """
         if not sid:
             return self.current_sid
+        self._authorize_chat(sid)     # BEFORE bind_current — binding LOADS the document
         self.bind_current(sid)
         # No clearing needed: input / board_view / the poisoned-line latch are per-session fields on
         # `_Live`, so binding another chat's bundle IS the isolation — nothing to reset.
@@ -942,7 +1003,8 @@ class StateStore:
         """The rail's session list + which is current — pushed over /state (on connect and on every
         switch), so the rail updates live instead of the app having to re-poll."""
         from .sessions import list_sessions
-        return {"sessions": list_sessions(self.home, self.db), "current": self._current}
+        return {"sessions": list_sessions(self.home, self.db, user_id=self.current_user),
+                "current": self._current}
 
     # -- live engine lines (writer: LiveAnalyzer; transient, not persisted) ----
     def publish_engine_lines(self, payload: dict, *, session_id: str) -> None:

@@ -14,6 +14,7 @@ dependencies = [
     "fastapi>=0.110",         # WS/REST server
     "uvicorn>=0.29",          # ASGI server
     "websockets>=12.0",       # WS
+    "argon2-cffi>=23.1",      # password hashing (argon2id; bcrypt truncates at 72 bytes)
 ]                             # lucena-engine is installed from the sibling engine/ (editable)
 
 [project.optional-dependencies]

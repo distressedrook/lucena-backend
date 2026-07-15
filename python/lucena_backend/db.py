@@ -26,15 +26,44 @@ from psycopg.types.json import Jsonb
 from lucena_engine.board import Board
 from lucena_engine._fen import norm_fen
 
-SCHEMA_VERSION = 7               # bumped from the SQLite lineage (6) — the Postgres relational cut
+SCHEMA_VERSION = 8               # 8: accounts — app_user, auth_token, session.user_id
 _BOARD_SCHEMA = 1                # matches state.SCHEMA (the board object's "schema" field)
 
+# NOTE: this DDL only ever reaches a FRESH schema. `CREATE TABLE IF NOT EXISTS` skips a table that
+# already exists, so a column added here silently never appears on an existing schema, and nothing
+# reads `meta.schema_version` to branch. That is survivable ONLY because every schema is currently
+# disposable (tests drop s_* schemas; the dev DB is recreated). A versioned migration stepper is a
+# BLOCKING item before the first production deploy — see RELEASE_CHECKLIST.md. Changing this DDL
+# today means recreating the dev database.
 _DDL = """
 CREATE TABLE IF NOT EXISTS meta (key text PRIMARY KEY, value text);
+
+-- A person. `app_user`, NOT `user`: `user` is a reserved word in Postgres and would need quoting in
+-- every statement that touches it.
+CREATE TABLE IF NOT EXISTS app_user (
+    id text PRIMARY KEY, email text NOT NULL, password_hash text NOT NULL,
+    created_at double precision NOT NULL);
+CREATE UNIQUE INDEX IF NOT EXISTS app_user_email ON app_user (lower(email));
+
+-- A LOGIN session — an authenticated user. Deliberately NOT called `session`: that name is taken by
+-- the CHAT session below, and conflating the two is the mistake this schema exists to avoid.
+-- Only the sha256 of the bearer token is stored, so a DB dump is not a credential dump.
+CREATE TABLE IF NOT EXISTS auth_token (
+    token_hash text PRIMARY KEY, user_id text NOT NULL REFERENCES app_user(id) ON DELETE CASCADE,
+    created_at double precision NOT NULL, expires_at double precision,
+    last_used_at double precision);
+CREATE INDEX IF NOT EXISTS auth_token_user ON auth_token (user_id);
+
+-- A CHAT session: one coaching conversation. A user has MANY. `is_active` marks which one that user
+-- currently has open (their "active chat") — it is NOT related to `status`, which happens to also use
+-- the word 'active'.
 CREATE TABLE IF NOT EXISTS session (
     id text PRIMARY KEY, name text, created_at double precision, updated_at double precision,
-    status text NOT NULL DEFAULT 'active', is_active boolean NOT NULL DEFAULT false);
-CREATE UNIQUE INDEX IF NOT EXISTS one_active_session ON session (is_active) WHERE is_active;
+    status text NOT NULL DEFAULT 'active', is_active boolean NOT NULL DEFAULT false,
+    user_id text REFERENCES app_user(id) ON DELETE CASCADE);
+-- One active chat PER USER (was one globally, which is what made this single-tenant).
+CREATE UNIQUE INDEX IF NOT EXISTS one_active_chat_per_user ON session (user_id) WHERE is_active;
+CREATE INDEX IF NOT EXISTS session_by_user ON session (user_id, updated_at DESC);
 
 -- legacy per-session view (pre-P1 fallback + the beats sidecar's companion columns)
 CREATE TABLE IF NOT EXISTS session_view (
@@ -146,12 +175,70 @@ class DB:
                      "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
             self._conn.commit()
 
-    # -- sessions rail -----------------------------------------------------
-    def upsert_session(self, session_id: str, name: str, now: float) -> None:
+    # -- accounts (login sessions live here; chat sessions are below) ------
+    def create_user(self, user_id: str, email: str, password_hash: str, now: float) -> None:
         with self._lock:
-            self._ex("INSERT INTO session(id,name,created_at,updated_at) VALUES(%s,%s,%s,%s) "
+            self._ex("INSERT INTO app_user(id,email,password_hash,created_at) VALUES(%s,%s,%s,%s)",
+                     (user_id, email, password_hash, now))
+            self._conn.commit()
+
+    def get_user_by_email(self, email: str) -> dict | None:
+        with self._lock:
+            row = self._ex("SELECT id,email,password_hash FROM app_user WHERE lower(email)=lower(%s)",
+                           (email,)).fetchone()
+        return {"id": row[0], "email": row[1], "password_hash": row[2]} if row else None
+
+    def put_token(self, token_hash: str, user_id: str, now: float,
+                  expires_at: float | None) -> None:
+        with self._lock:
+            self._ex("INSERT INTO auth_token(token_hash,user_id,created_at,expires_at,last_used_at) "
+                     "VALUES(%s,%s,%s,%s,%s) ON CONFLICT(token_hash) DO NOTHING",
+                     (token_hash, user_id, now, expires_at, now))
+            self._conn.commit()
+
+    def user_for_token(self, token_hash: str, now: float) -> str | None:
+        """The user this bearer token belongs to, or None if unknown/expired. Expiry is enforced HERE
+        rather than by a background sweep, so a stale row can never authenticate."""
+        with self._lock:
+            row = self._ex("SELECT user_id FROM auth_token WHERE token_hash=%s "
+                           "AND (expires_at IS NULL OR expires_at > %s)",
+                           (token_hash, now)).fetchone()
+            if row:
+                self._ex("UPDATE auth_token SET last_used_at=%s WHERE token_hash=%s",
+                         (now, token_hash))
+                self._conn.commit()
+        return row[0] if row else None
+
+    def delete_token(self, token_hash: str) -> None:
+        with self._lock:
+            self._ex("DELETE FROM auth_token WHERE token_hash=%s", (token_hash,))
+            self._conn.commit()
+
+    # -- chat sessions rail ------------------------------------------------
+    def session_owner(self, session_id: str) -> tuple[bool, str | None]:
+        """`(exists, user_id)` for a chat.
+
+        Existence is returned SEPARATELY from the owner because a bare `user_id` cannot distinguish
+        "no such chat" (fine — the caller is about to create it) from "an existing chat with no owner"
+        (a pre-accounts row, which an authenticated user must NOT be able to touch). Collapsing those
+        two into `None` lets a real user reach and mutate legacy rows.
+        """
+        with self._lock:
+            row = self._ex("SELECT user_id FROM session WHERE id=%s", (session_id,)).fetchone()
+        return (row is not None, row[0] if row else None)
+
+    def owner_of(self, session_id: str) -> str | None:
+        """Which user owns this chat; None if it does not exist OR predates accounts. Prefer
+        `session_owner` for authorization — this cannot tell those two apart."""
+        return self.session_owner(session_id)[1]
+
+    def upsert_session(self, session_id: str, name: str, now: float,
+                       user_id: str | None = None) -> None:
+        with self._lock:
+            self._ex("INSERT INTO session(id,name,created_at,updated_at,user_id) "
+                     "VALUES(%s,%s,%s,%s,%s) "
                      "ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at",
-                     (session_id, name, now, now))
+                     (session_id, name, now, now, user_id))
             self._conn.commit()
 
     def set_session_name(self, session_id: str, name: str) -> None:
@@ -169,22 +256,50 @@ class DB:
             self._ex("UPDATE session SET status=%s WHERE id=%s", (status, session_id))
             self._conn.commit()
 
-    def set_active_session(self, session_id: str) -> None:
-        """At most one session is_active (replaces the session.json pointer)."""
+    def set_active_session(self, session_id: str, user_id: str | None = None) -> None:
+        """Mark `session_id` as THIS USER's active chat (at most one per user).
+
+        Both statements are scoped to the owner. Un-scoped, the first would clear EVERY user's active
+        chat, and the second would let any caller re-point a chat they do not own — the scope IS the
+        ownership check. `user_id=None` means the pre-accounts / in-memory path, which has exactly one
+        implicit user and no rows to protect.
+        """
         with self._lock:
-            self._ex("UPDATE session SET is_active=false WHERE is_active")
-            self._ex("UPDATE session SET is_active=true WHERE id=%s", (session_id,))
+            if user_id is None:
+                self._ex("UPDATE session SET is_active=false WHERE is_active AND user_id IS NULL")
+                self._ex("UPDATE session SET is_active=true WHERE id=%s AND user_id IS NULL",
+                         (session_id,))
+            else:
+                self._ex("UPDATE session SET is_active=false WHERE is_active AND user_id=%s",
+                         (user_id,))
+                cur = self._ex("UPDATE session SET is_active=true WHERE id=%s AND user_id=%s",
+                               (session_id, user_id))
+                if cur.rowcount == 0:
+                    # Do not leave the user with no active chat and no error: either the chat does
+                    # not exist or it belongs to someone else.
+                    self._conn.rollback()
+                    raise PermissionError(f"chat {session_id!r} is not owned by user {user_id!r}")
             self._conn.commit()
 
-    def get_active_session(self) -> str | None:
+    def get_active_session(self, user_id: str | None = None) -> str | None:
         with self._lock:
-            row = self._ex("SELECT id FROM session WHERE is_active").fetchone()
+            if user_id is None:
+                row = self._ex("SELECT id FROM session WHERE is_active AND user_id IS NULL "
+                               "LIMIT 1").fetchone()
+            else:
+                row = self._ex("SELECT id FROM session WHERE is_active AND user_id=%s LIMIT 1",
+                               (user_id,)).fetchone()
             return row[0] if row else None
 
-    def list_sessions(self) -> list[dict]:
+    def list_sessions(self, user_id: str | None = None) -> list[dict]:
+        """This user's chats. Un-scoped, the rail would show every user every other user's chats."""
         with self._lock:
-            rows = self._ex("SELECT id,name,updated_at,status FROM session "
-                            "ORDER BY updated_at DESC").fetchall()
+            if user_id is None:
+                rows = self._ex("SELECT id,name,updated_at,status FROM session "
+                                "WHERE user_id IS NULL ORDER BY updated_at DESC").fetchall()
+            else:
+                rows = self._ex("SELECT id,name,updated_at,status FROM session WHERE user_id=%s "
+                                "ORDER BY updated_at DESC", (user_id,)).fetchall()
         return [{"session_id": r[0], "name": r[1], "updated_at": r[2], "status": r[3] or "active"}
                 for r in rows]
 

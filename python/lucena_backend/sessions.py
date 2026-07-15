@@ -18,10 +18,10 @@ def refresh_session_names(home: str, db=None) -> None:
     return
 
 
-def list_sessions(home: str, db=None) -> list[dict]:
+def list_sessions(home: str, db=None, *, user_id: str | None = None) -> list[dict]:
     """Every session for `home` (from OUR DB), newest first: `{session_id, name, updated_at}`. A PURE
     read of the DB rows — no I/O, no writes — so it is safe on the event loop and inside a snapshot.
     The DB is the source of truth. (`home` is kept in the signature for call-site stability.)"""
     if db is None:
         return []
-    return sorted(db.list_sessions(), key=lambda s: s["updated_at"], reverse=True)
+    return sorted(db.list_sessions(user_id), key=lambda s: s["updated_at"], reverse=True)

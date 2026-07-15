@@ -15,10 +15,11 @@ from __future__ import annotations
 import asyncio
 import os
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Header, WebSocket, WebSocketDisconnect
 from starlette.responses import JSONResponse
 
 from lucena_engine.uci import Engine
+from . import auth
 from .state import StateStore
 from .db import DB
 from .tools import ToolContext
@@ -26,6 +27,19 @@ from .orchestrator import Orchestrator
 from .quick import QuickCoach
 
 _DEFAULT_MODEL = os.environ.get("LUCENA_MODEL", "gemini-flash-lite-latest")
+# Accounts off => every request is one implicit anonymous user (the single-user desktop mode this
+# started as, and what the existing suite exercises). On => every route except /health and /auth/*
+# needs a bearer token. Off by default so single-user local runs keep working unchanged.
+_AUTH_REQUIRED = os.environ.get("LUCENA_REQUIRE_AUTH", "").lower() in ("1", "true", "yes")
+
+
+def _unauthorized():
+    return JSONResponse({"error": "unauthenticated"}, status_code=401)
+
+
+def _forbidden():
+    """Auth is off, so a PermissionError here means an ownership violation, not a missing token."""
+    return JSONResponse({"error": "forbidden"}, status_code=403)
 
 
 def _open_chat_bound(store, sid: str) -> None:
@@ -152,11 +166,17 @@ def build_app(*, home: str, llm=None, model: str = _DEFAULT_MODEL,
 
     @app.websocket("/ws")
     async def ws(websocket: WebSocket):
+        # AuthMiddleware has already authenticated this handshake (and closed it 1008 before accept if
+        # the token was bad), and bound the user for this connection's whole context.
         await websocket.accept()
-        # This connection's chat. `?session=<id>` picks one explicitly; otherwise fall back to the
-        # durable active-chat pointer (minting one if this home has never had a chat).
+        # This connection's chat. `?session=<id>` picks one explicitly; otherwise fall back to this
+        # user's active-chat pointer (minting one if they have never had a chat).
         requested = websocket.query_params.get("session")
-        sid = await asyncio.to_thread(store.ensure_session_id, requested)
+        try:
+            sid = await asyncio.to_thread(store.ensure_session_id, requested)
+        except PermissionError:
+            await websocket.close(code=1008)         # asked for someone else's chat
+            return
         sub = store.subscribe(sid)
         bg: set[asyncio.Task] = set()
         try:
@@ -188,10 +208,13 @@ def build_app(*, home: str, llm=None, model: str = _DEFAULT_MODEL,
                         if new_sid and new_sid != sid:
                             # Under the gate: waits out any in-flight send, so no event dequeued for
                             # the old chat can still reach this socket once retarget returns.
+                            try:                   # ownership is enforced inside open_chat
+                                await asyncio.to_thread(_open_chat_bound, store, new_sid)
+                            except PermissionError:
+                                continue                   # not this user's chat — ignore the request
                             async with sub.gate:
                                 store.retarget(sub, new_sid)
                             sid = new_sid
-                            await asyncio.to_thread(_open_chat_bound, store, sid)
                         continue
                     # Bind BEFORE spawning: create_task copies the current context, so the task
                     # inherits this chat and cannot re-resolve a different one when it finally writes.
@@ -217,26 +240,61 @@ def build_app(*, home: str, llm=None, model: str = _DEFAULT_MODEL,
     async def health():
         return {"ok": True}
 
+    # -- accounts ----------------------------------------------------------
+    @app.post("/auth/register")
+    async def register(body: dict):
+        try:
+            uid = await auth.register(db, body.get("email") or "", body.get("password") or "")
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        return {"user_id": uid}
+
+    @app.post("/auth/login")
+    async def login_route(body: dict):
+        tok = await auth.login(db, body.get("email") or "", body.get("password") or "")
+        if tok is None:
+            return JSONResponse({"error": "bad_credentials"}, status_code=401)
+        return {"token": tok}
+
+    @app.post("/auth/logout")
+    async def logout_route(authorization: str | None = Header(default=None)):
+        if authorization and authorization.lower().startswith("bearer "):
+            await asyncio.to_thread(db.delete_token, auth.token_hash(authorization.split()[1]))
+        return {"ok": True}
+
+    # Auth is handled ONCE, in auth.AuthMiddleware (applied below), which rejects before any route
+    # runs and binds the user for the whole request. Routes therefore never check tokens: they just
+    # read the ambient user via the store, exactly as the coach paths do.
+
     # REST has no connection to carry a chat, so these take one explicitly (`session_id` in the body /
-    # `?session=`), falling back to the durable active-chat pointer. They must never run against an
+    # `?session=`), falling back to this user's active-chat pointer. They must never run against an
     # unbound cursor.
     async def _rest_sid(requested: str | None) -> str:
         return await asyncio.to_thread(store.ensure_session_id, requested)
 
     @app.get("/sessions")
     async def sessions(session: str | None = None):
+        """This user's chats only — un-scoped, the rail would show everyone everyone else's."""
         from .sessions import list_sessions
-        rows = await asyncio.to_thread(list_sessions, store.home, store.db)
-        return {"sessions": rows, "current": await _rest_sid(session)}
+        try:
+            current = await _rest_sid(session)      # ?session= can name someone else's chat
+        except PermissionError:
+            return _forbidden()
+        rows = await asyncio.to_thread(list_sessions, store.home, store.db,
+                                       user_id=store.current_user)
+        return {"sessions": rows, "current": current}
 
     @app.get("/session")
     async def get_session():
-        return {"session_id": await _rest_sid(None)}
+        try:
+            return {"session_id": await _rest_sid(None)}
+        except PermissionError:
+            return _forbidden()
 
     @app.post("/session/new")
     async def new_session():
-        """'New chat' — the BACKEND mints the id, makes it the active chat (publishing reset + a
-        clean snapshot to that chat's sockets), and returns it for the app to adopt."""
+        """'New chat' — the BACKEND mints the id, makes it this user's active chat (publishing reset +
+        a clean snapshot to that chat's sockets), and returns it for the app to adopt."""
         return {"session_id": await asyncio.to_thread(store.new_session)}
 
     @app.post("/session")
@@ -244,7 +302,10 @@ def build_app(*, home: str, llm=None, model: str = _DEFAULT_MODEL,
         sid = body.get("session_id")
         if not sid:
             return JSONResponse({"error": "bad_session"}, status_code=400)
-        return {"session_id": await asyncio.to_thread(store.write_session_id, sid)}
+        try:
+            return {"session_id": await asyncio.to_thread(store.write_session_id, sid)}
+        except PermissionError:
+            return _forbidden()
 
     @app.post("/move")
     async def move(body: dict):
@@ -253,9 +314,12 @@ def build_app(*, home: str, llm=None, model: str = _DEFAULT_MODEL,
         uci, fen = body.get("uci"), body.get("fen")
         if not uci:
             return JSONResponse({"error": "bad_move"}, status_code=400)
-        sid = await _rest_sid(body.get("session_id"))
-        with store.bound(sid):
-            return await _play_and_coach(uci, fen, session_id=sid)
+        try:
+            sid = await _rest_sid(body.get("session_id"))
+            with store.bound(sid):
+                return await _play_and_coach(uci, fen, session_id=sid)
+        except PermissionError:
+            return _forbidden()
 
     @app.post("/drill")
     async def drill(body: dict):
@@ -263,11 +327,14 @@ def build_app(*, home: str, llm=None, model: str = _DEFAULT_MODEL,
         fen = body.get("fen")
         if not fen:
             return JSONResponse({"error": "bad_fen"}, status_code=400)
-        # Same as /move: _arm_drill writes tree/board/drill state and publishes, so it must run
-        # against a resolved chat — never the unbound "" bucket.
-        sid = await _rest_sid(body.get("session_id"))
-        with store.bound(sid):
-            return await asyncio.to_thread(_arm_drill, ctx, store, fen)
+        try:
+            # Same as /move: _arm_drill writes tree/board/drill state and publishes, so it must run
+            # against a resolved chat — never the unbound "" bucket.
+            sid = await _rest_sid(body.get("session_id"))
+            with store.bound(sid):
+                return await asyncio.to_thread(_arm_drill, ctx, store, fen)
+        except PermissionError:
+            return _forbidden()
 
     @app.post("/analyze")
     async def analyze(body: dict):
@@ -279,6 +346,9 @@ def build_app(*, home: str, llm=None, model: str = _DEFAULT_MODEL,
     async def config():
         return {"model": model, "maia": maia is not None, "rating": rating}
 
+    # One gate for the whole app, HTTP and WS alike. Everything not in AuthMiddleware.PUBLIC needs a
+    # token, so a route added later is refused by default instead of silently exposed.
+    app.add_middleware(auth.AuthMiddleware, db=db, store=store, required=_AUTH_REQUIRED)
     return app
 
 
