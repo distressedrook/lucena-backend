@@ -909,13 +909,16 @@ def test_snapshot_empty_still_has_beats_channel(store):
 
 
 def test_state_publish_delivers_board_event_to_subscriber(store):
-    # Mirrors production: subscribe on the loop, then a WORKER THREAD writes (FastMCP runs
-    # sync tools off-loop), so the publish must hop back via call_soon_threadsafe.
+    # Mirrors production: subscribe on the loop, then a WORKER THREAD writes (sync tools run
+    # off-loop), so the publish must hop back via call_soon_threadsafe.
+    # asyncio.to_thread — NOT loop.run_in_executor — because to_thread copies the context, so the
+    # bound chat crosses into the worker. run_in_executor does not, and the write would land in an
+    # unbound chat. Production only ever uses to_thread.
     async def scenario():
-        q = store.subscribe()
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, store.write_board, START)
-        return await asyncio.wait_for(q.get(), timeout=2.0)
+        with store.bound("chat-1"):
+            sub = store.subscribe("chat-1")
+            await asyncio.to_thread(store.write_board, START)
+            return await asyncio.wait_for(sub.get(), timeout=2.0)
 
     channel, payload = asyncio.run(scenario())
     assert channel == "board"
@@ -924,12 +927,12 @@ def test_state_publish_delivers_board_event_to_subscriber(store):
 
 def test_state_publish_beats_are_append_deltas(store):
     async def scenario():
-        q = store.subscribe()
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(
-            None, store.append_beats,
-            [{"kind": "say", "stops": False, "segments": [{"text": "one"}]}])
-        return await asyncio.wait_for(q.get(), timeout=2.0)
+        with store.bound("chat-1"):
+            sub = store.subscribe("chat-1")
+            await asyncio.to_thread(
+                store.append_beats,
+                [{"kind": "say", "stops": False, "segments": [{"text": "one"}]}])
+            return await asyncio.wait_for(sub.get(), timeout=2.0)
 
     channel, payload = asyncio.run(scenario())
     assert channel == "beats"
@@ -1253,17 +1256,24 @@ def test_phrasing_counters_are_per_session(store):
     assert ctx._sc.ptxt_i == 5 and ctx._sc.maia_cache_key == ("fenA", 1500, 5)   # A's are intact
 
 
-def test_session_switch_fires_on_switch_callback(tmp_path):
-    """Item 16 (regression): a real session switch fires the _on_switch hook — serve_http uses it to
-    reset the live analyzer off the OLD session's position (it would otherwise keep publishing it)."""
+def test_open_chat_binds_and_loads_each_chat(tmp_path):
+    """Opening a chat binds it for this context and loads its bundle.
+
+    Replaces test_session_switch_fires_on_switch_callback. `_on_switch` was a hook whose only real
+    consumer (serve_http) no longer exists — it was never assigned in production, so the deleted test
+    was keeping dead code alive by asserting on it. Its stated purpose (resetting the live analyzer
+    off the OLD session's position) is moot twice over: the analyzer is entirely unwired, and
+    publishes are now addressed to a chat rather than fanned out globally.
+    """
     from lucena_backend.db import DB
     store = StateStore(str(tmp_path), db=DB(str(tmp_path / "lucena_backend.db")))
-    fired = []
-    store._on_switch = lambda: fired.append(True)
-    store._switch_current("A")
-    store._switch_current("B")
-    store._switch_current("B")                      # not a real change → no fire
-    assert len(fired) == 2
+    store.open_chat("A")
+    assert store.current_sid == "A"
+    store.open_chat("B")
+    assert store.current_sid == "B"
+    assert {"A", "B"} <= set(store._live)           # each chat kept its own bundle
+    store.open_chat("B")                            # idempotent: no change, still bound
+    assert store.current_sid == "B"
 
 
 def test_push_activity_seed_cannot_author_the_view(store):

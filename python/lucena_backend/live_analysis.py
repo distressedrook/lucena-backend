@@ -28,6 +28,7 @@ class LiveAnalyzer:
         self._pv_plies = pv_plies
         self._cond = threading.Condition()
         self._fen: str | None = None
+        self._sid: str | None = None  # the chat this target belongs to (see set_target)
         self._on = False
         self._gen = 0                 # bumps on every target change → cancels the in-flight deepen
         self._stopped = False
@@ -37,10 +38,17 @@ class LiveAnalyzer:
         self._thread = threading.Thread(target=self._run, name="live-analysis", daemon=True)
         self._thread.start()
 
-    def set_target(self, fen: str | None, on: bool) -> None:
-        """Analyze `fen` while `on`; a change cancels any in-flight deepen and restarts from depth 1."""
+    def set_target(self, fen: str | None, on: bool, *, session_id: str) -> None:
+        """Analyze `fen` for chat `session_id` while `on`; a change cancels any in-flight deepen and
+        restarts from depth 1.
+
+        `session_id` is REQUIRED and travels with the target: this class deepens on its OWN raw
+        `threading.Thread`, and contextvars do NOT cross a raw thread — the store's bound cursor would
+        resolve empty here, so the chat must be carried explicitly and handed to publish_engine_lines.
+        """
         with self._cond:
-            self._fen, self._on, self._gen = fen, on, self._gen + 1
+            self._fen, self._on, self._sid = fen, on, session_id
+            self._gen += 1
             self._cond.notify_all()
 
     def stop(self) -> None:
@@ -60,10 +68,10 @@ class LiveAnalyzer:
                     self._cond.wait()
                 if self._stopped:
                     return
-                fen, gen = self._fen, self._gen
-            self._deepen(fen, gen)
+                fen, gen, sid = self._fen, self._gen, self._sid
+            self._deepen(fen, gen, sid)
 
-    def _deepen(self, fen: str, gen: int) -> None:
+    def _deepen(self, fen: str, gen: int, sid: str | None) -> None:
         for depth in range(1, self._max_depth + 1):
             with self._cond:
                 if self._stopped or gen != self._gen:
@@ -75,13 +83,15 @@ class LiveAnalyzer:
             with self._cond:
                 if self._stopped or gen != self._gen:   # target changed mid-search — drop this result
                     return
-            self._publish(fen, depth, analysis)
+            self._publish(fen, depth, analysis, sid)
         # Reached max depth — idle on this position until the target changes.
         with self._cond:
             while not self._stopped and gen == self._gen:
                 self._cond.wait()
 
-    def _publish(self, fen: str, depth: int, analysis) -> None:
+    def _publish(self, fen: str, depth: int, analysis, sid: str | None) -> None:
+        if not sid:                                  # no chat → nobody to address; never publish blind
+            return
         white = fen.split()[1] == "w"
         lines = []
         for ln in analysis.lines:
@@ -96,4 +106,4 @@ class LiveAnalyzer:
         self._store.publish_engine_lines({
             "fen": fen, "depth": depth, "engine": self._engine.name,
             "opening": openings.name_for(fen), "lines": lines,
-        })
+        }, session_id=sid)

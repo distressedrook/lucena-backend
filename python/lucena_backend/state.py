@@ -15,17 +15,25 @@ call and app mutation behind one lock; the heartbeat uses its own `seq`.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import os
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 from lucena_engine.board import Board
 from .statefile import write_state
 
 SCHEMA = 1
+
+# The bound chat session for the current execution context. Per-context, NOT per-process: two
+# concurrent turns cannot see each other's value, which is the whole point — a background turn parked
+# in the LLM must still write to the chat it started in, whatever anyone else has opened meanwhile.
+# Bind it at entry points via `StateStore.bound(sid)`; never assign it directly outside this module.
+_current_sid: contextvars.ContextVar[str] = contextvars.ContextVar("lucena_current_sid", default="")
 VERSION = "0.1.0"
 
 
@@ -213,6 +221,50 @@ def _frame_from_dict(d: dict | None) -> _Frame:
 
 
 @dataclass
+class Subscription:
+    """One reader watching one chat — a queue, the loop that owns it, and which chat it is on.
+
+    `epoch` bumps on every retarget. Events are stamped with the (chat, epoch) they were enqueued
+    for, and `get` drops anything that no longer matches, so a socket that switches chats cannot be
+    handed deltas from the chat it just left. The map lock alone cannot do this: by the time a switch
+    happens, old-chat events may already be sitting in the queue, or their `call_soon_threadsafe`
+    callbacks may already be scheduled — neither can be unsent.
+    """
+
+    queue: asyncio.Queue
+    sid: str
+    loop: object
+    epoch: int = 0
+    # Held by the reader across "check the stamp, then send", and by a retarget before it mutates
+    # sid/epoch. Without it there is a third stale window the epoch alone cannot close: the reader can
+    # dequeue a still-matching event, yield at the send, have a retarget land in that gap, and then
+    # deliver the old chat's event to a socket that has already switched. The invariant this buys:
+    # once retarget returns, no event dequeued under the old (sid, epoch) can still be sent.
+    gate: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    async def next_event(self) -> tuple:
+        """The next event still live for this subscription, as `(sid, epoch, channel, payload)`.
+
+        Returns the stamp too, so the reader can RE-CHECK it under `gate` immediately before sending
+        — the check here is necessary but not sufficient on its own.
+        """
+        while True:
+            ev = await self.queue.get()
+            if ev[0] == self.sid and ev[1] == self.epoch:
+                return ev
+            # else: stale — queued for a chat this reader has since left. Drop it.
+
+    def is_live(self, sid: str, epoch: int) -> bool:
+        """Does this stamp still match? Re-checked under `gate` after dequeue, before send."""
+        return sid == self.sid and epoch == self.epoch
+
+    async def get(self) -> tuple:
+        """Convenience for non-socket readers: the next live event as `(channel, payload)`."""
+        _sid, _epoch, channel, payload = await self.next_event()
+        return channel, payload
+
+
+@dataclass
 class StateStore:
     """Owns the Lucena directory's state files and the per-session live view."""
 
@@ -223,17 +275,21 @@ class StateStore:
     # `_Live` bundle below, partitioned by session id — there are no session-state store globals.
     _hb_seq: int = 0
     _session_seq: int = 0
-    _subscribers: set = field(default_factory=set)   # set[asyncio.Queue]
-    _loop: object | None = None                      # the server's event loop (for threadsafe publish)
-    _on_switch: object | None = None                 # optional callback fired after a session switch
-                                                     # (serve_http uses it to reset the live analyzer,
-                                                     #  whose target is otherwise the OLD session's fen)
-    # The session state is partitioned by Claude Code session id (`_current`); the app's board / beats /
-    # analysis / drill / input / gate are ALWAYS the current session's. Every per-session field
-    # (`_beats`, `_last_board`, `_input`, seqs, …) is a proxy property onto `_cur`, so
-    # nothing leaks across a switch.
-    _live: dict = field(default_factory=dict)        # session_id -> _Live
-    _current: str = ""                               # current session id; "" until one is set
+    # chat_session_id -> {queue: loop}. Per-CHAT, so a publish reaches only the sockets watching that
+    # chat. The loop is stored PER SUBSCRIBER, not once on the store: `_publish` schedules queue puts
+    # with call_soon_threadsafe, and a single store-wide loop is silently wrong the moment more than
+    # one loop is involved (the last subscriber would win and earlier sockets would never wake).
+    _subscribers: dict = field(default_factory=dict)
+    # The session state is partitioned by chat session id; the app's board / beats / analysis / drill /
+    # input / gate are ALWAYS the bound chat's. Every per-session field (`_beats`, `_last_board`,
+    # `_input`, seqs, …) is a proxy property onto `_cur`, so nothing leaks across chats.
+    _live: dict = field(default_factory=dict)        # chat_session_id -> _Live
+    # Guards first-touch of `_live[sid]`: the check-then-insert in `_cur` does DB I/O in `_load_live`,
+    # so two threads racing a cold chat would both load it.
+    _live_lock: object = field(default_factory=threading.RLock)
+    # When true, resolving an unbound cursor raises instead of silently using "". Tests turn this on so
+    # a publish/write that escapes its chat is loud rather than landing in `_live[""]`.
+    _strict: bool = False
     # Serializes the version-bump + publish so concurrent writers (an inline move in a worker thread,
     # the coach's background beat on the event loop, a still-running arm task) never race the monotonic
     # `version` — a stale/duplicate version makes the app's ordered-delta guard DROP the event (a
@@ -241,11 +297,44 @@ class StateStore:
     # persist/publish calls under one mutator are fine.
     _wlock: object = field(default_factory=threading.RLock)
 
+    # -- the bound chat (the cursor) ---------------------------------------------------------------
+    # `_current` is NOT stored on the store. It lives in a ContextVar, so two concurrent turns cannot
+    # see each other's value: the cursor is per execution context, not per process. It propagates
+    # across asyncio.create_task (context is copied at creation) and asyncio.to_thread (which does
+    # copy_context().run), which is every path the server actually uses. It does NOT cross a raw
+    # threading.Thread — such callers must be passed a session_id explicitly.
+    @property
+    def _current(self) -> str:
+        return self.current_sid
+
+    @property
+    def current_sid(self) -> str:
+        sid = _current_sid.get()
+        if not sid and self._strict:
+            raise RuntimeError(
+                "no chat session is bound in this context: a read/write/publish escaped its chat. "
+                "Bind one with `with store.bound(sid):` at the entry point."
+            )
+        return sid
+
+    @contextmanager
+    def bound(self, sid: str):
+        """Bind `sid` as the current chat for this execution context (and anything it spawns)."""
+        token = _current_sid.set(sid)
+        try:
+            yield self
+        finally:
+            _current_sid.reset(token)
+
     @property
     def _cur(self) -> _Live:
-        if self._current not in self._live:
-            self._live[self._current] = self._load_live(self._current)
-        return self._live[self._current]
+        return self._live_for(self.current_sid)
+
+    def _live_for(self, sid: str) -> _Live:
+        with self._live_lock:
+            if sid not in self._live:
+                self._live[sid] = self._load_live(sid)
+            return self._live[sid]
 
     # -- the last per-session runtime fields: input mailbox, /position fen, poisoned-line latch --
     @property
@@ -639,11 +728,18 @@ class StateStore:
         self._switch_current(session_id)          # sets the DB is_active flag when there is a DB
         return session_id
 
-    def ensure_session_id(self) -> str:
-        """The durable session id, minting + persisting a fresh UUID on first use — so the app
-        always fetches a stable id and the coaching thread is resumed, not restarted."""
-        sid = self.read_session_id() or self.write_session_id(str(uuid.uuid4()))
-        self._switch_current(sid)
+    def ensure_session_id(self, requested: str | None = None) -> str:
+        """Resolve the chat this caller should be on, minting one on first use — so the app always
+        gets a stable id and the coaching thread is resumed, not restarted.
+
+        `requested` attaches to a specific existing chat (a connection naming its own). Without it,
+        fall back to the durable active-chat pointer, then to a fresh chat.
+
+        Attaches rather than opens: this is called on every REST request and on socket connect, and
+        must not replay a snapshot at the chat's sockets each time.
+        """
+        sid = requested or self.read_session_id() or str(uuid.uuid4())
+        self.attach_chat(sid)
         self._seed_start_board()
         return sid
 
@@ -654,71 +750,142 @@ class StateStore:
         if self._last_board is None:
             self.write_board(_START_FEN)
 
-    def _switch_current(self, sid: str) -> None:
-        """Point the live view at `sid`'s bundle. On a real change, tell the app to reset and
-        replay that session's snapshot — so switching sessions swaps the board/beats/drill and
-        never shows another session's coaching."""
-        if not sid or sid == self._current:
+    def bind_current(self, sid: str) -> str:
+        """Bind `sid` as this context's chat and make sure its bundle is loaded. Pure: no DB write,
+        no publish. Use this to attach a caller to a chat that already exists."""
+        if not sid:
+            return self.current_sid
+        _current_sid.set(sid)
+        self._live_for(sid)          # restore this chat's beats/board from the DB if it is cold
+        return sid
+
+    def _activate(self, sid: str) -> None:
+        """Make `sid` the durable active chat. No publish — see open_chat vs attach_chat."""
+        if self.db is None:
             return
-        self._current = sid
-        # No clearing needed: input / board_view / the poisoned-line latch are now per-session fields on
-        # `_Live`, so pointing `_current` at another session's bundle IS the isolation — nothing to reset.
-        if sid not in self._live:
-            self._live[sid] = self._load_live(sid)     # restore this session's beats/board from DB
-        if self.db is not None:
-            # The current session has ONE canonical home: `_current` (memory, the authority) mirrored
-            # to session.json for restart. We do NOT also stamp a `current_session` DB-meta row — that
-            # was a rival copy with zero readers (`get_meta` is never called for it), and a second home
-            # for one fact is exactly the drift this design forbids.
-            # Record the session so it shows in the rail immediately (named), before Claude has
-            # written any transcript — its beats are already tied to it in the DB.
-            self.db.upsert_session(sid, DEFAULT_SESSION_NAME, time.time())
-            self.db.set_active_session(sid)       # the current-session pointer (replaces session.json)
-            # Switching sessions is an explicit event (off the event loop, under the tool lock) — a fine
-            # place to cache any freshly-available transcript titles into the DB, so the rail we're about
-            # to publish shows nice names. The snapshot's own read (_sessions_payload) stays pure.
-            from .sessions import refresh_session_names
-            refresh_session_names(self.home, self.db)
-        # The live analyzer's target is a flat, process-level fen — reset it on a switch so it stops
-        # deepening (and publishing) the OLD session's position under the new session's version. The
-        # app re-arms it via /analyze for the new session when it wants live analysis.
-        if callable(self._on_switch):
-            try:
-                self._on_switch()
-            except Exception:
-                pass
-        self._publish("reset", {})
+        # The active chat has ONE canonical home: the DB's is_active row. We do NOT also stamp a
+        # `current_session` DB-meta row — that was a rival copy with zero readers, and a second home
+        # for one fact is exactly the drift this design forbids.
+        # Record the chat so it shows in the rail immediately (named), before anything has titled it —
+        # its beats are already tied to it in the DB.
+        self.db.upsert_session(sid, DEFAULT_SESSION_NAME, time.time())
+        self.db.set_active_session(sid)           # the active-chat pointer (replaces session.json)
+        from .sessions import refresh_session_names
+        refresh_session_names(self.home, self.db)
+
+    def attach_chat(self, sid: str) -> str:
+        """Bind `sid` and make it the active chat, WITHOUT replaying a snapshot.
+
+        For callers that are merely resolving which chat they are on — every REST request, a socket
+        on connect (which sends the snapshot itself). Publishing here would be wrong: a REST request
+        starts with an unbound cursor, so a "did it change?" test against the caller's own cursor is
+        always true, and every request would blast a reset + full snapshot at that chat's sockets
+        (which is exactly what made the app see a stale seed board after a /move).
+        """
+        if not sid:
+            return self.current_sid
+        self.bind_current(sid)
+        self._activate(sid)
+        return sid
+
+    def open_chat(self, sid: str) -> str:
+        """Bind `sid`, make it active, AND replay its snapshot to the sockets watching it — so
+        opening a chat swaps the board/beats/drill and never shows another chat's coaching.
+
+        For the EXPLICIT act of opening a chat (the `open_chat` WS message, POST /session). Publishing
+        is unconditional: 'already current' is a property of ONE context under a per-context cursor,
+        so a fresh connection whose cursor is unbound must still get the snapshot even when another
+        connection already has this chat open. Suppressing it on a cursor comparison would leave that
+        socket bound to nothing, reading `_live[""]`, showing an empty board.
+        """
+        if not sid:
+            return self.current_sid
+        self.bind_current(sid)
+        # No clearing needed: input / board_view / the poisoned-line latch are per-session fields on
+        # `_Live`, so binding another chat's bundle IS the isolation — nothing to reset.
+        self._activate(sid)
+        self._publish_to(sid, "reset", {})
         for channel, payload in self.snapshot():
-            self._publish(channel, payload)
+            self._publish_to(sid, channel, payload)
+        return sid
 
-    # -- SSE pub/sub (writer: mcp; readers: app `/state` connections) ------
-    def subscribe(self) -> asyncio.Queue:
-        """Register an SSE subscriber (called from the `/state` async handler). Captures the
-        running loop so sync tool writers can publish thread-safely."""
-        self._loop = asyncio.get_running_loop()
-        q: asyncio.Queue = asyncio.Queue()
-        self._subscribers.add(q)
-        return q
+    # Back-compat alias: the existing suite drives session switching through this name, and keeping it
+    # green across the cursor rewrite is the regression net for the proxy rewiring.
+    _switch_current = open_chat
 
-    def unsubscribe(self, q: asyncio.Queue) -> None:
-        self._subscribers.discard(q)
+    # -- pub/sub (writer: the coach/app paths; readers: the app's WS connections) ------
+    def subscribe(self, sid: str) -> Subscription:
+        """Register a subscriber watching chat `sid`. Captures the running loop ALONGSIDE the queue,
+        so sync writers publish thread-safely to the loop that actually owns it."""
+        sub = Subscription(queue=asyncio.Queue(), sid=sid, loop=asyncio.get_running_loop())
+        with self._live_lock:
+            self._subscribers.setdefault(sid, {})[sub.queue] = sub
+        return sub
+
+    def unsubscribe(self, sub: Subscription) -> None:
+        with self._live_lock:
+            watchers = self._subscribers.get(sub.sid)
+            if watchers is not None:
+                watchers.pop(sub.queue, None)
+                if not watchers:
+                    self._subscribers.pop(sub.sid, None)
+
+    def retarget(self, sub: Subscription, new_sid: str) -> None:
+        """Move a subscriber from one chat to another (a socket switching chats).
+
+        Bumping `epoch` is what makes the switch clean. Taking `_live_lock` stops a publish from
+        enqueuing into the chat this socket just left, but it CANNOT unsend what is already in the
+        queue, nor cancel a `call_soon_threadsafe` callback already scheduled. Those carry the old
+        (sid, epoch) and `Subscription.get` drops them.
+        """
+        if sub.sid == new_sid:
+            return
+        with self._live_lock:
+            (self._subscribers.get(sub.sid) or {}).pop(sub.queue, None)
+            if not self._subscribers.get(sub.sid):
+                self._subscribers.pop(sub.sid, None)
+            sub.sid = new_sid
+            sub.epoch += 1
+            self._subscribers.setdefault(new_sid, {})[sub.queue] = sub
 
     def _publish(self, channel: str, payload: dict) -> None:
-        """Fan a `(channel, payload)` event out to every SSE subscriber. Safe to call from a
-        worker thread (FastMCP runs sync tools off-loop) — hops onto the loop via
-        `call_soon_threadsafe`. No-op when nobody's listening."""
-        if self._loop is None or not self._subscribers:
-            return
-        # P4a: stamp the monotonic document `version` on every delta (non-mutating shallow copy, so
-        # the stored payload stays clean). The app ignores it until P4b, when it applies deltas in
-        # version order and reconnects on a gap. Transient channels (engine_lines/status) get it too.
-        if isinstance(payload, dict) and "version" not in payload:
-            payload = {**payload, "version": self._version}
-        for q in list(self._subscribers):
-            try:
-                self._loop.call_soon_threadsafe(q.put_nowait, (channel, payload))
-            except RuntimeError:
-                pass
+        """Fan a `(channel, payload)` event out to the subscribers of the CURRENTLY BOUND chat.
+
+        Resolving the chat from the context here is what keeps every existing call site unchanged
+        while making the fan-out session-scoped.
+        """
+        self._publish_to(self.current_sid, channel, payload)
+
+    def _publish_to(self, sid: str, channel: str, payload: dict) -> None:
+        """Fan an event out to the subscribers of chat `sid` ONLY — never to other chats' sockets.
+
+        Callers that run off any loop-aware path (a raw thread, e.g. the live analyzer) must use this
+        directly and pass their session id: contextvars do not cross `threading.Thread`.
+        """
+        # Enqueue under `_live_lock`, the same lock `retarget`/`unsubscribe` mutate the map with, so a
+        # socket switching chats can never be handed a delta from the chat it just left: without it,
+        # this could copy the queue out of the old chat's bucket and enqueue AFTER retarget moved it.
+        # Safe to hold across the loop — call_soon_threadsafe is non-blocking — and it is an RLock, so
+        # the nested `_live_for` below re-enters fine.
+        with self._live_lock:
+            watchers = self._subscribers.get(sid)
+            if not watchers:
+                return
+            # P4a: stamp the monotonic document `version` on every delta (non-mutating shallow copy,
+            # so the stored payload stays clean). The app applies deltas in version order and
+            # reconnects on a gap, so the version MUST come from the publishing chat's own bundle —
+            # read `_live_for(sid)` directly rather than `_version` (which would resolve the caller's
+            # cursor and could stamp a different chat's number, silently making the app DROP it).
+            if isinstance(payload, dict) and "version" not in payload:
+                payload = {**payload, "version": self._live_for(sid).version}
+            # Every event carries the chat + subscription epoch it was enqueued for, so a reader that
+            # has since switched chats can drop it (see Subscription.get).
+            for sub in list(watchers.values()):
+                stamped = (sid, sub.epoch, channel, payload)
+                try:
+                    sub.loop.call_soon_threadsafe(sub.queue.put_nowait, stamped)
+                except RuntimeError:
+                    pass
 
     def snapshot(self) -> list[tuple[str, dict]]:
         """The current UI state as `(channel, payload)` events, for replay on (re)connect —
@@ -778,10 +945,16 @@ class StateStore:
         return {"sessions": list_sessions(self.home, self.db), "current": self._current}
 
     # -- live engine lines (writer: LiveAnalyzer; transient, not persisted) ----
-    def publish_engine_lines(self, payload: dict) -> None:
-        """Push a live multi-PV analysis snapshot for the current position. Transient — regenerated
-        continuously by the analyzer, so it's not stored or replayed in the snapshot."""
-        self._publish("engine_lines", payload)
+    def publish_engine_lines(self, payload: dict, *, session_id: str) -> None:
+        """Push a live multi-PV analysis snapshot for chat `session_id`. Transient — regenerated
+        continuously by the analyzer, so it's not stored or replayed in the snapshot.
+
+        `session_id` is REQUIRED and explicit: the analyzer deepens on its OWN raw thread
+        (LiveAnalyzer._run), and contextvars do not cross `threading.Thread` — the bound cursor would
+        resolve empty there and the event would be stamped with the wrong chat's version, which makes
+        the app's ordered-delta guard silently DROP it.
+        """
+        self._publish_to(session_id, "engine_lines", payload)
 
     # -- live agent status (writer: tool wrappers; transient, not persisted) ---
     def publish_status(self, text: str | None) -> None:

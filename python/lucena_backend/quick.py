@@ -37,6 +37,13 @@ class QuickCoach:
 
     async def explain(self, *, session_id: str, fen: str, move: str | None = None,
                       correct: bool | None = None) -> dict:
+        """Bind the chat, then explain. `session_id` was accepted and ignored for the whole
+        single-chat era; binding it is what keeps this turn's beats in this chat."""
+        with self.store.bound(session_id):
+            return await self._explain(fen=fen, move=move, correct=correct)
+
+    async def _explain(self, *, fen: str, move: str | None = None,
+                       correct: bool | None = None) -> dict:
         # Ground: a move → its refutation via evaluate; a bare position → the grounded briefing. Raise
         # the working halo for the whole call (engine eval + one generation ≈ several seconds) so the
         # app shows "thinking" instead of appearing frozen; clear it on every exit path.

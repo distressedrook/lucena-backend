@@ -388,7 +388,9 @@ def test_resume_replays_persisted_view_exactly_once(tmp_path):
     # Move away, then record everything the resume of A publishes.
     s._switch_current("B")
     published = []
-    s._publish = lambda ch, payload: published.append((ch, payload))  # type: ignore[method-assign]
+    # open_chat publishes via _publish_to (events are ADDRESSED to a chat now, not fanned out
+    # from the bound cursor), so that is the seam to observe.
+    s._publish_to = lambda sid, ch, payload: published.append((ch, payload))  # type: ignore[method-assign]
     s._switch_current("A")                 # resume A
 
     view_events = [p for ch, p in published if ch == "view"]
@@ -413,7 +415,9 @@ def test_resume_of_session_without_view_emits_no_view_event(tmp_path):
 
     s._switch_current("B")                 # go elsewhere
     published = []
-    s._publish = lambda ch, payload: published.append((ch, payload))  # type: ignore[method-assign]
+    # open_chat publishes via _publish_to (events are ADDRESSED to a chat now, not fanned out
+    # from the bound cursor), so that is the seam to observe.
+    s._publish_to = lambda sid, ch, payload: published.append((ch, payload))  # type: ignore[method-assign]
     s._switch_current("C")                 # resume the never-explored session
 
     assert not any(ch == "view" for ch, _ in published)
@@ -585,7 +589,9 @@ def test_resume_replays_line_and_tree(tmp_path):
     post_view(s, branch_snapshot("A"))
     s._switch_current("B")
     published = []
-    s._publish = lambda ch, payload: published.append((ch, payload))  # type: ignore[method-assign]
+    # open_chat publishes via _publish_to (events are ADDRESSED to a chat now, not fanned out
+    # from the bound cursor), so that is the seam to observe.
+    s._publish_to = lambda sid, ch, payload: published.append((ch, payload))  # type: ignore[method-assign]
     s._switch_current("A")
     ev = next(p for ch, p in published if ch == "view")
     assert [row.get("san") for row in ev["line"]] == [None, "e4", "e5", "Nc3"]
@@ -601,7 +607,9 @@ def test_resume_drops_view_when_mainline_diverged(tmp_path):
     post_view(s, branch_snapshot("A"))
     # Sanity: matching history replays the view.
     published = []
-    s._publish = lambda ch, payload: published.append((ch, payload))  # type: ignore[method-assign]
+    # open_chat publishes via _publish_to (events are ADDRESSED to a chat now, not fanned out
+    # from the bound cursor), so that is the seam to observe.
+    s._publish_to = lambda sid, ch, payload: published.append((ch, payload))  # type: ignore[method-assign]
     s._switch_current("B"); s._switch_current("A")
     assert any(ch == "view" for ch, _ in published)
     # Now diverge A's mainline: ply 1 becomes d4, not e4.

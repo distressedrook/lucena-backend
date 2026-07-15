@@ -115,7 +115,8 @@ def test_switch_publishes_reset_then_snapshot(tmp_path):
     s.append_beats([_say("hi")])
     # Switching to B emits a reset followed by B's snapshot (which always replays beats).
     published = []
-    s._publish = lambda ch, payload: published.append(ch)   # type: ignore[method-assign]
+    # Publishes are now ADDRESSED to a chat (_publish_to), not fanned out from the bound cursor.
+    s._publish_to = lambda sid, ch, payload: published.append(ch)   # type: ignore[method-assign]
     s._switch_current("B")
     assert published[0] == "reset"
     assert "beats" in published                # snapshot always replays a beats event

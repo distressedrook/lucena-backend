@@ -180,6 +180,13 @@ class Orchestrator:
         self._poisoned_shown: str | None = None   # latch: the poisoned line we've already narrated
 
     async def run_turn(self, session_id: str, text: str | None = None) -> dict:
+        # `session_id` was accepted and ignored here for the whole single-chat era (the caller passed
+        # store._current straight back in). Bind it: every read/write/publish below this line resolves
+        # to THIS chat, including work handed to asyncio.to_thread (which copies the context).
+        with self.store.bound(session_id):
+            return await self._run_turn(text)
+
+    async def _run_turn(self, text: str | None = None) -> dict:
         ctx = self.ctx
         # Echo what the player typed into the conversation as a "you" bubble (the app doesn't render it
         # locally) — so the chat reads as a dialogue, not just the coach's replies. A pasted FEN/PGN is
@@ -261,7 +268,14 @@ class Orchestrator:
             parts.append(f"the motif is a {fatal}")
         return "; ".join(parts) + "."
 
-    async def coach_move(self, uci: str, pre_fen: str | None, result: dict) -> dict:
+    async def coach_move(self, session_id: str, uci: str, pre_fen: str | None, result: dict) -> dict:
+        """Bind the chat this move was played in, then coach it. `session_id` is REQUIRED: this runs
+        as a DETACHED background task and can outlive its turn, so it must not resolve the cursor at
+        write time (that is the late-read race)."""
+        with self.store.bound(session_id):
+            return await self._coach_move(uci, pre_fen, result)
+
+    async def _coach_move(self, uci: str, pre_fen: str | None, result: dict) -> dict:
         """Coach a move the player JUST played — for drills AND freeform. The move was already
         adjudicated + applied by ctx.play_move (board, opponent reply, history); this adds the LLM's
         grounded voice, TOLD the drill context so it says 'that's the right move, now look for …' or

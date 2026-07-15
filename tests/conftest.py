@@ -49,3 +49,17 @@ def _clean_pg_schemas():
     _drop_test_schemas()
     yield
     _drop_test_schemas()
+
+
+@pytest.fixture(autouse=True)
+def _reset_bound_chat():
+    """Unbind the chat cursor around every test.
+
+    `StateStore.bind_current` sets a ContextVar without resetting it — correct for the server, where
+    each connection/task gets its own copied context, but pytest runs every test in ONE context, so a
+    chat bound by one test would leak into the next and silently mask an unbound-cursor bug.
+    """
+    from lucena_backend.state import _current_sid
+    token = _current_sid.set("")
+    yield
+    _current_sid.reset(token)
