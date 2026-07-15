@@ -13,12 +13,14 @@ testable surface (LLD §9 "contract tests"). Determinism split: production uses
 
 from __future__ import annotations
 
+import contextvars
 import functools
 import os
 import re
 import threading
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager, nullcontext as _nullcontext
 from dataclasses import dataclass, field
 
 from lucena_engine.board import Board
@@ -33,6 +35,54 @@ from lucena_engine.positional import analyze_positional
 from lucena_engine import poisoned_line_detector as _poisoned_line_detector
 from . import puzzle_content
 from . import response as R
+from .enginepool import SingleEnginePool
+
+# The Stockfish leased to the current guarded call, and that call's nesting depth. Both are
+# ContextVars, not fields: a field would be shared by every chat running concurrently, which is the
+# state the pool and the per-chat locks exist to eliminate.
+#
+# `_guard_depth` is a property of the CALL STACK, not of a chat — `_guarded` is sync and runs
+# top-to-bottom in one thread. As a plain int it was correct only because ONE process-wide lock made
+# it single-threaded; the moment locks became per-chat, two chats in `_guarded` would corrupt the
+# counter and the error journal would double-log or drop silently. Nothing crashes — which is why it
+# must not be split from the lock change.
+_leased_engine: contextvars.ContextVar = contextvars.ContextVar("lucena_leased_engine", default=None)
+_guard_depth: contextvars.ContextVar[int] = contextvars.ContextVar("lucena_guard_depth", default=0)
+
+_POISONED_CACHE_CAP = 256      # unbounded, this grew for the life of the process
+
+
+class _SyncCache(dict):
+    """A dict that is safe to share across chats, and bounded.
+
+    `find_poisoned_lines` takes the cache by reference and does its own get/set inside the search, so
+    synchronisation has to live in the mapping itself rather than at the call site. The lock covers
+    get/set ONLY — never a search — so two chats racing a cold position may both compute it. That is a
+    duplicated search, not a wrong answer: detection is a pure function of the position.
+    """
+
+    def __init__(self, *, cap: int = _POISONED_CACHE_CAP):
+        super().__init__()
+        self._cap = cap
+        self._lock = threading.Lock()
+
+    def get(self, key, default=None):
+        with self._lock:
+            return super().get(key, default)
+
+    def __getitem__(self, key):
+        with self._lock:
+            return super().__getitem__(key)
+
+    def __contains__(self, key):
+        with self._lock:
+            return super().__contains__(key)
+
+    def __setitem__(self, key, value):
+        with self._lock:
+            super().__setitem__(key, value)
+            while len(self) > self._cap:
+                super().pop(next(iter(self)))      # FIFO: the detector does not track recency
 
 # Live poisoned-line-detection params — tuned for ~1-2s synchronous latency (deep combos still surface at
 # plies=8; k=4 covers the top human moves; 120k nodes catches the big spikes). Full-enumeration
@@ -152,15 +202,33 @@ def _guarded(method):
 
     @functools.wraps(method)
     def wrapper(self, *args, **kwargs):
-        # Serialize ALL tool entries across BOTH surfaces (coach MCP calls and the app's threaded
-        # /move + /explore_poisoned_line endpoints). ToolContext/StateStore state — the drill walker, the
-        # turn gate, seq counters, the history line — is single-threaded by design; without this
-        # lock a coach call racing an app move can interleave read-modify-writes. RLock: nested
-        # guarded calls (explore_poisoned_line → _explore_poisoned_line, play_move → assess_move) re-enter fine.
-        with self._tool_lock:
-            self._guard_depth += 1
+        # Serialize tool entries PER CHAT across both surfaces (coach calls and the app's threaded
+        # /move + /explore_poisoned_line endpoints). ToolContext/StateStore state — the drill walker,
+        # the turn gate, seq counters, the history line — is single-threaded by design, so a coach
+        # call racing an app move IN THE SAME CHAT would interleave read-modify-writes. Different
+        # chats share none of that state, so they are not held against each other. RLock: nested
+        # guarded calls (explore_poisoned_line → _explore_poisoned_line, play_move → assess_move)
+        # re-enter fine.
+        sid = self.store.current_sid if self.store is not None else ""
+        with self._lock_for(sid):
+            depth = _guard_depth.get()
+            _guard_depth.set(depth + 1)
+            # Lease an engine for the OUTERMOST guarded frame only, and hold it for the whole call:
+            # callers mutate per-engine UCI options mid-call (explore_and_show sets Threads=1 and
+            # restores it) and MultiPV is sticky, so the engine must not change under them. Nested
+            # frames reuse the same lease — a nested lease would deadlock a pool of one and waste a
+            # slot in a real pool.
+            leased = _leased_engine.get()
+            need_lease = leased is None and self._pool is not None
+            lease_cm = self._pool.lease() if need_lease else _nullcontext(leased)
             try:
-                result = method(self, *args, **kwargs)
+                with lease_cm as eng:
+                    token = _leased_engine.set(eng) if need_lease else None
+                    try:
+                        result = method(self, *args, **kwargs)
+                    finally:
+                        if token is not None:
+                            _leased_engine.reset(token)
             except EngineError as e:
                 result = R.error(
                     "engine_unavailable",
@@ -174,12 +242,12 @@ def _guarded(method):
                     f"— retry; if it persists, restart the session.",
                 )
             finally:
-                self._guard_depth -= 1
+                _guard_depth.set(depth)
             # Local error journal: every error a tool hands back (validation, refusal, gate, crash)
             # is appended to <home>/errors.log with a timestamp — errors are otherwise only visible
             # inside the coach's context, which makes field debugging guesswork. Outermost guarded
             # frame only (a nested guarded call would double-log the same error). Best-effort.
-            if self._guard_depth == 0 and isinstance(result, dict) and "error" in result:
+            if depth == 0 and isinstance(result, dict) and "error" in result:
                 self._log_error(method.__name__, result)
             return result
 
@@ -407,9 +475,13 @@ class _SessCtx:
 
 
 class ToolContext:
-    def __init__(self, engine, store, *, limit: dict | None = None, mastery=None,
-                 maia=None, player_rating: int = 1500):
-        self.engine = engine
+    def __init__(self, engine=None, store=None, *, limit: dict | None = None, mastery=None,
+                 maia=None, player_rating: int = 1500, pool=None):
+        # An engine is LEASED from the pool for the duration of each guarded tool call and exposed
+        # through `self.engine` (a property over a ContextVar), so all the call sites below read the
+        # engine THIS call owns. `ToolContext(engine, store)` still works — a caller-supplied engine
+        # becomes a pool of one.
+        self._pool = pool or (SingleEnginePool(engine) if engine is not None else None)
         self.store = store
         self.mastery = mastery  # a MasteryEngine, or None (analysis-only sessions)
         self.maia = maia        # a MaiaEngine, or None — the human-move predictor (never truth)
@@ -419,11 +491,16 @@ class ToolContext:
         # is stateless per position and version-pinned — so the coach hitting the SAME position across
         # analyze_and_show / evaluate / get_hints in one turn reuses one search instead of 2-3. Also
         # makes the eval the coach reads consistent across those tools (no movetime jitter per call).
+        # SHARED across chats on purpose (a position's analysis does not depend on who asked), which is
+        # a real saving — but that makes it concurrently accessed, hence its own mutex: an unsynchronised
+        # OrderedDict with LRU eviction corrupts or raises under threads.
         self._analysis_cache: OrderedDict = OrderedDict()
-        # One reentrant lock serializes every guarded tool entry across both surfaces (coach MCP
-        # calls + the app's threaded HTTP endpoints) — see _guarded. State here is not thread-safe.
-        self._tool_lock = threading.RLock()
-        self._guard_depth = 0   # nesting depth of guarded calls; errors log at the outermost frame
+        self._analysis_cache_lock = threading.Lock()
+        # One reentrant lock PER CHAT, not one for the process: the state it protects (the drill walker,
+        # the turn gate, seq counters, the history line) is per-chat, so a single lock made every user's
+        # turn queue behind every other user's. Chats share no state, so they need no mutual exclusion.
+        self._tool_locks: dict = {}
+        self._tool_locks_meta = threading.Lock()   # guards first-touch of the dict itself
         # The turn/drill context, PARTITIONED per session id (P2) — same pattern as StateStore._live.
         # `_facts`/`_last_fen`/`_awaiting_input`/`_class`/… below are proxy properties onto the current
         # session's _SessCtx, so every call site stays unchanged.
@@ -434,7 +511,48 @@ class ToolContext:
         # tests) → detect runs serially on the main engine. `_poisoned_line_cache` memoizes detect by position.
         self.poisoned_line_engine = None
         self._poisoned_line_engine_factory = None
-        self._poisoned_line_cache: dict = {}
+        # Serializes the WHOLE detector call on the shared dedicated engine. `find_poisoned_lines` is
+        # a multi-call algorithm (new_game/analyse, repeatedly): Engine's own lock makes each command
+        # atomic, but not the sequence, so two detections on one engine interleave into each other's
+        # searches. One process-wide tool lock used to prevent that as a side effect; per-chat locks
+        # do not, so the engine needs its own.
+        self._poisoned_line_engine_lock = threading.RLock()
+        # Passed BY REFERENCE into find_poisoned_lines, which reads and writes it inside the search —
+        # so it cannot be locked at the call boundary. A guard on get/set only: never across a search,
+        # which would serialize every chat on the cache instead of on the engine.
+        self._poisoned_line_cache = _SyncCache(cap=_POISONED_CACHE_CAP)
+
+    # -- the leased engine -------------------------------------------------
+    @property
+    def engine(self):
+        """The Stockfish leased to THIS call.
+
+        A property over a ContextVar rather than a field, so every existing `self.engine` call site
+        reads the engine its own guarded call owns, with no rewrite. A field would be one shared
+        engine again — the thing the pool exists to stop.
+        """
+        eng = _leased_engine.get()
+        if eng is not None:
+            return eng
+        if self._pool is None:
+            return None     # ToolContext(None, store): there is genuinely no engine. Callers test
+                            # `self.engine is None` to skip engine work — keep that answerable.
+        # Outside a guarded call there is no lease. The pool-of-one case can still answer (the caller
+        # handed us that engine and owns it); a real pool cannot, and saying so beats handing back an
+        # arbitrary engine nobody has checked out.
+        if isinstance(self._pool, SingleEnginePool):
+            return self._pool._engine
+        raise RuntimeError(
+            "no engine is leased in this context: reach the engine from inside a @_guarded tool "
+            "call, or take a lease explicitly with `with ctx._pool.lease() as eng:`"
+        )
+
+    def _lock_for(self, sid: str):
+        with self._tool_locks_meta:
+            lock = self._tool_locks.get(sid)
+            if lock is None:
+                lock = self._tool_locks[sid] = threading.RLock()
+            return lock
 
     # -- per-session turn/drill context (P2): proxies onto the current session's _SessCtx --
     @property
@@ -524,19 +642,42 @@ class ToolContext:
         if self.maia is None:
             return None
         try:
-            return _poisoned_line_detector.find_poisoned_lines(
-                fen, engine, self.maia, rating=self.player_rating,
-                stop_on_first=stop_on_first, cache=self._poisoned_line_cache, **_LIVE_POISONED_LINE)
+            with self._shared_engine_guard(engine):
+                return _poisoned_line_detector.find_poisoned_lines(
+                    fen, engine, self.maia, rating=self.player_rating,
+                    stop_on_first=stop_on_first, cache=self._poisoned_line_cache,
+                    **_LIVE_POISONED_LINE)
         except Exception as e:
             self._log_error("poisoned_line", {"error": "detection_failed", "detail": f"{type(e).__name__}: {e}"})
             return None
 
+    @contextmanager
+    def _shared_engine_guard(self, engine):
+        """Hold the poisoned-line engine's lock for this block IFF `engine` is that shared engine.
+
+        EVERY multi-call engine sequence that can land on the dedicated engine must go through here —
+        the detector, and the concrete-line reconstruction in `_poisoned_line_moves` (a new_game +
+        analyse loop). Guarding only one of them leaves the other free to interleave on the same
+        process, which is the whole failure this lock exists to stop.
+
+        A LEASED engine takes no lock: the lease is already exclusive to this call, and locking again
+        would serialize chats that share nothing.
+        """
+        if engine is not None and engine is self.poisoned_line_engine:
+            with self._poisoned_line_engine_lock:
+                yield
+        else:
+            yield
+
     def _get_poisoned_line_engine(self):
         """The dedicated poisoned-line engine, spawned on first use (kept off the launch critical path).
         Returns None when no factory was set (stdio/tests) → callers fall back to the main engine."""
-        if self.poisoned_line_engine is None and self._poisoned_line_engine_factory is not None:
-            self.poisoned_line_engine = self._poisoned_line_engine_factory()
-        return self.poisoned_line_engine
+        # Under the meta lock: a bare check-then-set spawns two engines when two chats first need a
+        # detect at once, and leaks one of them forever (nothing else holds a reference).
+        with self._tool_locks_meta:
+            if self.poisoned_line_engine is None and self._poisoned_line_engine_factory is not None:
+                self.poisoned_line_engine = self._poisoned_line_engine_factory()
+            return self.poisoned_line_engine
 
     def _lim(self, movetime_ms: int) -> dict:
         return self._limit or {"movetime_ms": movetime_ms}
@@ -563,16 +704,23 @@ class ToolContext:
         genuinely different depths. Safe because analysis is a pure function of the position (stateless
         per fen, engine version-pinned); in nodes-mode (tests) the cached value is bit-identical."""
         key = (fen, tuple(sorted(lim.items())))
-        hit = self._analysis_cache.get(key)
-        if hit is not None and hit[0] >= multipv:
-            self._analysis_cache.move_to_end(key)
-            return hit[1]
-        self.engine.new_game()
+        with self._analysis_cache_lock:
+            hit = self._analysis_cache.get(key)
+            if hit is not None and hit[0] >= multipv:
+                self._analysis_cache.move_to_end(key)
+                return hit[1]
+        # Searched OUTSIDE the cache lock: this is the multi-second part, and holding a mutex across
+        # it would serialize every chat on the cache instead of on the engine — reintroducing the
+        # bottleneck the pool removes. Two chats racing the same cold position may both search; that
+        # is a duplicated search, not a wrong answer (analysis is a pure function of the position),
+        # and the loser simply overwrites with an identical value.
+        # `new_game()` is not called here — the lease already does it on acquire.
         res = self.engine.analyse(fen, multipv=multipv, **lim)
-        self._analysis_cache[key] = (multipv, res)
-        self._analysis_cache.move_to_end(key)
-        while len(self._analysis_cache) > self._ANALYSIS_CACHE_CAP:
-            self._analysis_cache.popitem(last=False)
+        with self._analysis_cache_lock:
+            self._analysis_cache[key] = (multipv, res)
+            self._analysis_cache.move_to_end(key)
+            while len(self._analysis_cache) > self._ANALYSIS_CACHE_CAP:
+                self._analysis_cache.popitem(last=False)
         return res
 
     def _maia_top(self, fen: str, n: int = 5) -> list[dict]:
@@ -1436,9 +1584,17 @@ class ToolContext:
         best reply, through the refuting tactic (the decisive defender move ends it). `fen` is the
         position AFTER each move (the app's VarNode shape). Node-limited + deterministic, so it
         reproduces the line the detector found. Empty list if there's no temptation or the seed is
-        illegal. Pure — writes no state."""
+        illegal. Pure — writes no state.
+
+        Guards itself: this is a new_game + analyse LOOP, so on the shared dedicated engine another
+        chat's detector would interleave with it. Guarding here rather than at each call site means a
+        new caller cannot forget (the RLock makes it free when a caller already holds the guard)."""
         if not temptation or not temptation.get("seeds") or self.maia is None:
             return []
+        with self._shared_engine_guard(eng):
+            return self._poisoned_line_moves_locked(fen, temptation, eng, plies=plies)
+
+    def _poisoned_line_moves_locked(self, fen, temptation, eng, *, plies=None):
         nodes = _LIVE_POISONED_LINE["nodes"]
         depth = plies if plies is not None else _LIVE_POISONED_LINE["plies"]
         board0 = Board(fen)
@@ -1488,6 +1644,13 @@ class ToolContext:
         except Exception as e:
             return R.error("illegal_fen", str(e))
         eng = self._get_poisoned_line_engine() or self.engine
+        # ONE guard across detection AND the reconstruction below: they are a single logical sequence
+        # on one engine, so releasing between them would let another chat interleave in the gap.
+        # (_shared_engine_guard's RLock re-enters _poisoned_line_moves' own guard.)
+        with self._shared_engine_guard(eng):
+            return self._explore_poisoned_line_locked(fen, eng)
+
+    def _explore_poisoned_line_locked(self, fen, eng):
         nres = _poisoned_line_detector.find_poisoned_lines(fen, eng, self.maia, rating=self.player_rating,
                               cache=self._poisoned_line_cache, **_LIVE_POISONED_LINE)
         if not nres["has_poisoned_line"] or not nres["temptations"]:

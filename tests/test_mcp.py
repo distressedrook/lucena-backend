@@ -2104,11 +2104,16 @@ def test_move_read_is_the_meaning_the_assess_channel_relays(engine, tmp_path):
 
 @requires_engine
 def test_assess_move_serializes_on_the_tool_lock(engine, tmp_path):
-    """Item 2 (regression): assess_move is a direct MCP tool the APP calls; it MUST run under the
-    single-writer @_guarded lock, or its engine calls interleave with a coach tool on the shared
-    Stockfish and one side reads the other's bestmove. We prove the lock is held for the duration
-    of the engine call by probing it from ANOTHER thread while assess_move runs: guarded → the
-    probe can't acquire; unguarded → it acquires freely."""
+    """Item 2 (regression): assess_move is a direct tool the APP calls; it MUST run under the
+    single-writer @_guarded lock for its own chat, or its engine calls interleave with a coach tool
+    in that chat and one side reads the other's bestmove. We prove the lock is held for the duration
+    of the engine call by probing it from ANOTHER thread while assess_move runs: guarded → the probe
+    can't acquire; unguarded → it acquires freely.
+
+    The lock is now PER CHAT (`_lock_for(sid)`), so the probe must ask for the same chat's lock —
+    probing a different one would acquire freely and the test would pass while asserting nothing.
+    test_two_chats_do_not_serialize_on_each_other covers the other half.
+    """
     import threading
     store = StateStore(str(tmp_path))
     ctx = ToolContext(engine, store, limit={"nodes": 40_000})
@@ -2117,10 +2122,11 @@ def test_assess_move_serializes_on_the_tool_lock(engine, tmp_path):
 
     def probing_analyse(*a, **k):
         def probe():
-            got = ctx._tool_lock.acquire(blocking=False)
+            lock = ctx._lock_for(store.current_sid)      # THIS chat's lock
+            got = lock.acquire(blocking=False)
             other_could_acquire.append(got)
             if got:
-                ctx._tool_lock.release()
+                lock.release()
         t = threading.Thread(target=probe)
         t.start()
         t.join()
@@ -2133,13 +2139,43 @@ def test_assess_move_serializes_on_the_tool_lock(engine, tmp_path):
         engine.analyse = real_analyse
     assert other_could_acquire, "engine.analyse was never called — test didn't exercise the lock"
     assert all(x is False for x in other_could_acquire), \
-        "assess_move ran without holding _tool_lock — its engine calls can interleave with a coach tool"
+        "assess_move ran without holding its chat's tool lock — its engine calls can interleave"
     assert r["san"] == "Rxe5"   # sanity: the guarded call still returns the assessment
     assert store._last_board is None   # still read-only under the guard
 
 
-@requires_engine
-@requires_maia
+def test_two_chats_do_not_serialize_on_each_other(engine, tmp_path):
+    """The point of the per-chat lock: chat B must NOT be held out while chat A is mid-tool. One
+    process-wide lock made every user's turn queue behind every other user's."""
+    import threading
+    store = StateStore(str(tmp_path))
+    ctx = ToolContext(engine, store, limit={"nodes": 40_000})
+    other_could_acquire = []
+    real_analyse = engine.analyse
+
+    def probing_analyse(*a, **k):
+        def probe():
+            lock = ctx._lock_for("some-other-chat")      # a DIFFERENT chat's lock
+            got = lock.acquire(blocking=False)
+            other_could_acquire.append(got)
+            if got:
+                lock.release()
+        t = threading.Thread(target=probe)
+        t.start()
+        t.join()
+        return real_analyse(*a, **k)
+
+    engine.analyse = probing_analyse
+    with store.bound("chat-a"):
+        try:
+            ctx.assess_move(HANG, "Rxe5")
+        finally:
+            engine.analyse = real_analyse
+    assert other_could_acquire, "engine.analyse was never called — test didn't exercise the lock"
+    assert all(x is True for x in other_could_acquire), \
+        "another chat was blocked while chat-a ran a tool — the lock is not per-chat"
+
+
 def test_assess_move_tool_is_read_only_and_player_facing(engine, tmp_path):
     # The app calls assess_move directly over MCP: {san, class, meaning}, player-facing,
     # no state writes, no fact sheet (lean/fast).

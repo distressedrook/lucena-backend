@@ -20,6 +20,7 @@ from starlette.responses import JSONResponse
 
 from lucena_engine.uci import Engine
 from . import auth
+from .enginepool import EnginePool, SingleEnginePool, default_size
 from .state import StateStore
 from .db import DB
 from .tools import ToolContext
@@ -27,6 +28,12 @@ from .orchestrator import Orchestrator
 from .quick import QuickCoach
 
 _DEFAULT_MODEL = os.environ.get("LUCENA_MODEL", "gemini-flash-lite-latest")
+# Engine pool sizing. Every knob is explicit and env-overridable because the cost is real and per
+# instance: `size` concurrent analyses, each a Stockfish process holding `hash_mb`. The floor is
+# size × hash_mb of RAM — the release checklist says to size this against real load, not a guess.
+_POOL_SIZE = int(os.environ.get("LUCENA_POOL_SIZE") or default_size())
+_POOL_THREADS = int(os.environ.get("LUCENA_POOL_THREADS", "1"))
+_POOL_HASH_MB = int(os.environ.get("LUCENA_POOL_HASH_MB", "64"))
 # Accounts off => every request is one implicit anonymous user (the single-user desktop mode this
 # started as, and what the existing suite exercises). On => every route except /health and /auth/*
 # needs a bearer token. Off by default so single-user local runs keep working unchanged.
@@ -72,16 +79,24 @@ def build_app(*, home: str, llm=None, model: str = _DEFAULT_MODEL,
     app = FastAPI(title="lucena-backend")
     db = DB(os.path.join(home, "lucena"))
     store = StateStore(home, db=db)
-    eng = engine or Engine()                       # in-process Stockfish
+    # A bounded pool, shared by both contexts: engines are fungible (new_game() on acquire), so a
+    # chat borrows one for a call rather than owning one. `engine=` still overrides for tests.
+    # threads/hash are explicit — Engine's own defaults are per-INSTANCE (threads = cpu-2, hash =
+    # 256MB), so a pool at those defaults would oversubscribe the CPU ~size× and reserve size×256MB.
+    pool = (SingleEnginePool(engine) if engine is not None
+            else EnginePool(size=_POOL_SIZE, threads=_POOL_THREADS, hash_mb=_POOL_HASH_MB))
     maia = _make_maia()
-    ctx = ToolContext(eng, store, maia=maia, player_rating=rating)
+    ctx = ToolContext(store=store, pool=pool, maia=maia, player_rating=rating)
     ctx._poisoned_line_engine_factory = lambda: Engine(threads=1)   # dedicated single-thread detector
-    # A SEPARATE engine + ToolContext for the coach's read-only LLM grounding (evaluate/analyze). It
-    # shares the store but has its own engine and its own tool lock, so the coach's multi-second
-    # analysis NEVER blocks an interactive move/drill on the main ctx (which was making a Retry right
-    # after a wrong move sit locked for seconds while coach_move ran). Maia off here — the main ctx owns
-    # the single Maia subprocess; a second caller would corrupt its UCI stream.
-    ground_ctx = ToolContext(Engine(), store, maia=None, player_rating=rating)
+    # A SEPARATE ToolContext for the coach's read-only LLM grounding (evaluate/analyze). It shares the
+    # store AND the pool, but has its own per-chat tool locks, so the coach's multi-second analysis
+    # never blocks an interactive move/drill on the main ctx (which was making a Retry right after a
+    # wrong move sit locked for seconds while coach_move ran). Do NOT collapse the two: one ctx would
+    # serialize a chat's own coaching against its own move again.
+    # Maia off here: the main ctx owns the single Maia subprocess. (It would BLOCK, not corrupt —
+    # MaiaEngine.top_human_moves holds its own lock across the whole conversation — but one predictor
+    # per process is deliberate: each instance is a ~485MB torch model.)
+    ground_ctx = ToolContext(store=store, pool=pool, maia=None, player_rating=rating)
     orch = Orchestrator(ctx=ctx, model=model, llm=llm, ground_ctx=ground_ctx)
     quick = QuickCoach(ctx=ctx, model=model, llm=llm, ground_ctx=ground_ctx)
 
