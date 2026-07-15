@@ -41,6 +41,12 @@ _COACH_SYSTEM = (
     "- mode='tell': ONLY when the player clearly wants to be told the answer (e.g. asks for the best "
     "move, says 'just tell me', 'show me the move', 'what should I play'). Then explain directly, "
     "naming the move and the reason.\n"
+    "- mode='unsupported': when the player is asking you to DO or START something you cannot do — play "
+    "or start a game/match, act as their opponent or a bot, run a puzzle/lesson flow, change app "
+    "settings or mode, or any request that is NOT about understanding the position on the board. Do "
+    "NOT coach the position in this case. Briefly acknowledge what they asked for and say you can't "
+    "help with that yet, with a light apology — e.g. 'Playing a full match against a bot isn't "
+    "something I can do yet — sorry!'. Keep it to one short sentence.\n"
     "Ground EVERY claim only in the facts provided — never invent a piece, square, line, or number. "
     "Translate evaluations into plain words ('you're winning', 'roughly equal') — never cite win% or "
     "centipawns.\n"
@@ -48,8 +54,8 @@ _COACH_SYSTEM = (
     "play the side to move. The OTHER colour is 'your opponent'. Every threat, attack, or plan belongs "
     "to the OPPONENT — never say the player is threatening their own pieces or defending against "
     "themselves. Name the opponent's threat when there is one. Warm, direct, one idea, no jargon walls.\n"
-    "Return JSON: {\"mode\": \"ask\"|\"tell\", \"text\": string}. `text` is the question (ask) or the "
-    "explanation (tell), shown to the player."
+    "Return JSON: {\"mode\": \"ask\"|\"tell\"|\"unsupported\", \"text\": string}. `text` is the question "
+    "(ask), the explanation (tell), or the short apology (unsupported), shown to the player."
 )
 
 _GRADE_SYSTEM = (
@@ -393,6 +399,12 @@ class Orchestrator:
         self._apply_name(out)
         mode = (out.get("mode") or "ask").lower()
         body = out.get("text") or "Let's take a look at this position together."
+        if mode == "unsupported":
+            # The player asked for something we can't do (play a match, act as a bot, …). Decline
+            # plainly instead of coaching the position; no Socratic gate, no hints.
+            self.store.append_beats([{"kind": "say", "tone": "teach",
+                                      "segments": [{"text": body}], "stops": False}])
+            return {"ok": True, "flow": "coach:unsupported", "tokens": self._last_tokens}
         beat = {"kind": "ask", "segments": [{"text": body}], "stops": True}
         if mode == "tell":
             beat = {"kind": "say", "tone": "teach", "segments": [{"text": body}], "stops": False}
