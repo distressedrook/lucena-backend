@@ -1,0 +1,15 @@
+Copyright (c) 2026 Avismara. All rights reserved.
+
+PROPRIETARY AND CONFIDENTIAL.
+
+lucena-backend is proprietary software. No license, right, or permission is
+granted to use, copy, modify, distribute, or create derivative works of this
+software, in whole or in part, except under a separate written agreement with
+the copyright holder.
+
+lucena-backend communicates with the separately-published `lucena-engine`
+(AGPL-3.0-or-later). That engine is dual-licensed by its sole copyright holder,
+who reserves the right to use it in this proprietary work; the AGPL grant runs
+to third parties, not to the author. See lucena-engine's LICENSE and NOTICE.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
