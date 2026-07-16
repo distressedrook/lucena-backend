@@ -11,6 +11,7 @@ import asyncio
 import re
 import os
 
+from lucena_engine import openings   # pure table lookups: no engine process, no I/O per call
 from .llm import make_adapter, Message, GenerateOptions, LLMAdapter
 
 # A FEN-like token (a rank of piece letters/digits then a side-to-move) anywhere in pasted text.
@@ -32,8 +33,40 @@ _EXTRACT_SYSTEM = (
 
 _JSON_OBJECT = {"type": "object"}
 
-_COACH_SYSTEM = (
-    "You are a chess coach speaking to one player. You are given the engine's grounded read of the "
+def _perspective(freeform: bool) -> str:
+    """The voice block: who the coach is talking to.
+
+    Two bodies, one function, because the answer is a property of the MODE and it appears in four
+    prompts — duplicating it is how the four drift apart.
+
+    In a DRILL the engine really does reply (drill.py plays the defence), so the player genuinely is
+    one side and "you" is correct. In FREEFORM nothing replies — `play_move` applies one ply and
+    stops, and the board has no side-to-move gate, so either colour is draggable. The player is
+    driving both sides of an analysis board: there is no "you" to address, only White and Black.
+    Saying "you played e4" there is not a style choice, it is factually wrong.
+    """
+    if freeform:
+        return (
+            "PERSPECTIVE (critical): there is NO 'you' here. The player is moving BOTH sides on an "
+            "analysis board — nobody is 'the player's colour'. Name the mover: 'White stakes the "
+            "centre', 'Black challenges it'. Never address anyone as 'you', never say 'your "
+            "opponent', never attribute a move or plan to 'the player'. Threats and plans belong to "
+            "the colour that owns them.\n"
+        )
+    return (
+        "PERSPECTIVE (critical — getting it backwards ruins the read): address the player as 'you'; "
+        "they play the side to move. The OTHER colour is 'your opponent'. Every threat, attack, or "
+        "plan belongs to the OPPONENT — never say the player is threatening their own pieces or "
+        "defending against themselves. Name the opponent's threat when there is one.\n"
+    )
+
+
+def _coach_system(freeform: bool) -> str:
+    return _COACH_SYSTEM_HEAD + _perspective(freeform) + _COACH_SYSTEM_TAIL
+
+
+_COACH_SYSTEM_HEAD = (
+    "You are a chess coach. You are given the engine's grounded read of the "
     "CURRENT position, the player's message, and the engine's best move. DECIDE how to respond:\n"
     "- DEFAULT (mode='ask'): lead with ONE Socratic question that guides them toward the key idea "
     "WITHOUT revealing or naming the best move. Use this whenever they're exploring, unsure, or ask "
@@ -48,15 +81,134 @@ _COACH_SYSTEM = (
     "help with that yet, with a light apology — e.g. 'Playing a full match against a bot isn't "
     "something I can do yet — sorry!'. Keep it to one short sentence.\n"
     "Ground EVERY claim only in the facts provided — never invent a piece, square, line, or number. "
-    "Translate evaluations into plain words ('you're winning', 'roughly equal') — never cite win% or "
-    "centipawns.\n"
-    "PERSPECTIVE (critical — getting it backwards ruins the read): address the player as 'you'; they "
-    "play the side to move. The OTHER colour is 'your opponent'. Every threat, attack, or plan belongs "
-    "to the OPPONENT — never say the player is threatening their own pieces or defending against "
-    "themselves. Name the opponent's threat when there is one. Warm, direct, one idea, no jargon walls.\n"
+    # The example was "you're winning" — which smuggles the drill voice into a prompt that BOTH modes
+    # share, underneath the perspective block that just said not to. Named colours read fine in both.
+    "Translate evaluations into plain words ('White is much better', 'roughly equal') — never cite "
+    "win% or centipawns.\n"
+)
+
+_COACH_SYSTEM_TAIL = (
+    "Warm, direct, one idea, no jargon walls.\n"
     "Return JSON: {\"mode\": \"ask\"|\"tell\"|\"unsupported\", \"text\": string}. `text` is the question "
     "(ask), the explanation (tell), or the short apology (unsupported), shown to the player."
 )
+
+# The narration prompt. It exists as a SECOND BODY rather than a flag on _MOVE_SYSTEM because it
+# inverts three of that prompt's instructions at once: length (1-2 sentences -> a paragraph), register
+# (its ban on "generic strategic advice" is exactly what narration IS), and verdict ("a strong move /
+# fine / an inaccuracy" — the literal source of "That's a fine move..."). Loosening _MOVE_SYSTEM to fit
+# would make DRILLS start dispensing "control the center".
+_NARRATE_SYSTEM_HEAD = (
+    "You are annotating a chess game as it is played, in the voice of a good opening book. A move has "
+    "just entered a NAMED opening, and your job is to explain what is being played — NOT to judge the "
+    "move, NOT to ask a question.\n"
+)
+
+# THE CARVE-OUT. CLAUDE.md's standing invariant is that the model interprets and never calculates:
+# anything it could get wrong is grounded or guarded. This is the ONE deliberate exception, and it is
+# written down here and in CLAUDE.md so it stays an exception instead of leaking into "the model does
+# chess now". The boundary is the whole point: opening IDEAS are stable, well-documented knowledge;
+# concrete evaluations and tactics are not, and those still come only from the facts.
+_NARRATE_SYSTEM_TAIL = (
+    "WHAT YOU MAY DRAW ON (a deliberate exception): you MAY use your own knowledge of the NAMED "
+    "opening — its ideas, typical plans, pawn structures, what each side is trying to achieve, and why "
+    "people choose it. This is the one place you are trusted beyond the given facts.\n"
+    "WHAT YOU MAY NOT: do not state any concrete evaluation, tactic, threat, or verdict on a specific "
+    "move that is not in the facts you were given. No win%, no centipawns, no invented lines. If you "
+    "are unsure whether something is true of THIS position rather than the opening in general, say it "
+    "about the opening in general or leave it out.\n"
+    "LENGTH: a short paragraph — three or four sentences. This is the one place you are NOT terse.\n"
+    "IF YOU ARE GIVEN A PREVIOUS OPENING NAME: the reader already had that explained. Write only what "
+    "this move ADDS. If the change is a refinement within the same family, one or two sentences is "
+    "plenty — do not restate the family.\n"
+    "IF YOU ARE GIVEN AN ENGINE CLASS for the move: the line concedes something real, and THAT is the "
+    "interesting part. Explain what it gives up and what it gets for it — the compensation, the "
+    "practical bet, why the line exists despite the engine's preference. Do not scold; this is theory.\n"
+    "Return JSON: {\"text\": string}."
+)
+
+
+def _narrate_system(prev_name: str | None = None) -> str:
+    # Narration is freeform-only by construction: a drill never narrates, so the perspective is always
+    # the named-mover one.
+    return _NARRATE_SYSTEM_HEAD + _perspective(True) + _NARRATE_SYSTEM_TAIL
+
+
+# The end of the book: an explicit hand-off, so the voice changing is legible to the player rather
+# than the coach silently developing a personality.
+_ENDBOOK_SYSTEM = (
+    "You are annotating a chess game. The players have just left opening theory — the position is no "
+    "longer in the book. Say so in ONE short sentence, plainly and without drama, and note that from "
+    "here they are working it out over the board rather than following a line.\n"
+    + _perspective(True) +
+    "Ground ONLY in the facts given. Return JSON: {\"text\": string}."
+)
+
+# -- book routing ---------------------------------------------------------------------------------
+# The four freeform routes. Named, because the choice is made once from a pure function and asserted
+# in tests by name — a bare string at the branch would be a typo away from silently coaching.
+_NARRATE, _ENDBOOK, _COACH, _SILENT = "narrate", "endbook", "coach", "silent"
+
+# Plies out of the book before we say so. FOUR, not three, and it is a measured heuristic rather than
+# a round number: two-unnamed-ply gaps occur at ~12% of book positions (the table names positions, not
+# lines, and re-attaches names unevenly), and the probe that measured it was capped at 3 — so 3-ply
+# gaps cannot be excluded and 3 has zero margin. Announcing "you have left the book" to someone still
+# in the Ruy Lopez is worse than announcing it a ply late.
+_OFF_BOOK_AT = 4
+
+# The engine's own word for "this move concedes something", not a threshold of our own invention:
+# `classify` already returns these for a win-% drop past _DUBIOUS (5.0) / _MISTAKE (10.0) / _BLUNDER
+# (15.0), measured against the engine's best move. A BOOK move that crosses one is the gambit case —
+# theory that the engine disagrees with — and that disagreement is the interesting part.
+_SWING_CLASSES = frozenset({"dubious", "mistake", "blunder"})
+
+
+def _is_swing(verdict: dict) -> bool:
+    return ((verdict or {}).get("class") or "") in _SWING_CLASSES
+
+
+def _book_route(fens: list, swing: bool) -> tuple:
+    """Which voice a freeform move gets: `(route, name, prev_name)`. Pure — no engine, no LLM, no DB.
+
+    Pure on purpose: this is the whole cadence policy, it has four interacting cases, and the way to
+    test it is to replay real openings through it and assert the exact fire sequence — not to mock an
+    LLM. The caller does I/O; this only decides.
+
+    The swing trigger is INDEPENDENT of the name change. 2...exf4 accepting the King's Gambit may not
+    change the name and is exactly the move worth explaining, so:
+
+        in book + name changed          -> narrate the opening   (nothing to judge; best/class hidden)
+        in book + swing                 -> explain the concession (the name is context, not news)
+        in book + both                  -> one beat: name it AND say what it concedes
+        in book + neither               -> silent (nothing new to say; do not fill the air)
+        just left the book              -> say so, once
+        off book / never in it          -> normal coaching
+    """
+    psn = openings.plies_since_named(fens)
+    if psn is None:                       # never in the book: a drill, a pasted midgame FEN.
+        return _COACH, None, None         # "you have left the book" is meaningless there.
+    if psn < _OFF_BOOK_AT:
+        name = openings.book_name(fens)
+        prev = openings.book_name(fens[:-1]) if len(fens) > 1 else None
+        changed = name is not None and name != prev
+        if changed or swing:
+            # `prev` is passed ONLY when the name changed — it is there to make the model write the
+            # DELTA ("Nc6 -> King's Knight Opening: Normal Variation" deserves a clause, not a
+            # paragraph). On a pure swing the name is unchanged, so there is no delta to write.
+            return _NARRATE, name, (prev if changed else None)
+        return _SILENT, name, None
+    if psn == _OFF_BOOK_AT:
+        # EXACTLY at the threshold, so this fires once per exit with no latch to store or resync. A
+        # transposition back into the book returns psn to 0 and re-arms it — correct: the book was
+        # left twice.
+        return _ENDBOOK, None, None
+    return _COACH, None, None
+
+
+def _mover(fen) -> str:
+    """The colour that just moved FROM `fen` — i.e. `fen`'s side to move."""
+    return "Black" if (fen and " b " in f" {fen} ") else "White"
+
 
 _GRADE_SYSTEM = (
     "You are a chess coach grading the player's answer to a question about the CURRENT position. You "
@@ -84,30 +236,50 @@ _WRONG_SYSTEM = (
     "player; threats belong to the opponent. Return JSON: {\"text\": string}."
 )
 
-_MOVE_SYSTEM = (
-    "You are a chess coach reacting to a move the player JUST made. You are told whether they are in a "
+def _move_system(freeform: bool) -> str:
+    return _MOVE_SYSTEM_HEAD + _perspective(freeform) + _move_system_tail(freeform)
+
+
+_MOVE_SYSTEM_HEAD = (
+    "You are a chess coach reacting to a move JUST made. You are told whether this is a "
     "drill and, if so, whether the move was CORRECT, WRONG, or SOLVED the drill; for a freeform move you "
-    "get its engine class. You also get the move's grounded facts and (when relevant) the position they "
-    "now face. Ground EVERY claim ONLY in those facts — never invent a piece, square, line, or number; "
-    "translate evaluations to plain words, never cite win% or centipawns. Speak to the player as 'you'; "
-    "the opponent is 'your opponent'; every threat belongs to the opponent. Keep it to 1-2 short "
+    "get its engine class. You also get the move's grounded facts and (when relevant) the position that "
+    "follows. Ground EVERY claim ONLY in those facts — never invent a piece, square, line, or number; "
+    "translate evaluations to plain words, never cite win% or centipawns. Keep it to 1-2 short "
     "sentences.\n"
+)
+
+def _move_system_tail(freeform: bool) -> str:
+    # The "unsure" fallback names a LOSER, so it has a voice too — and it is the one sentence the model
+    # reaches for exactly when it is least sure, which makes it the likeliest thing to be said. Left
+    # shared, it put "the position turns against you" directly underneath a perspective block that had
+    # just said there is no "you" — the prompt contradicting itself in the same breath. The lesson this
+    # keeps re-teaching: a voice fix is never one line, it is every line shaped like that line.
+    turns_against = ("the position turns against the side that played it" if freeform
+                     else "the position turns against you")
+    return (
     "- DRILL / CORRECT: confirm the move is right and name the idea it achieves, then point at what to "
     "look for NEXT without naming the next move.\n"
     "- DRILL / WRONG: say it isn't the move here and explain the flaw ONLY through the refutation line you "
     "are given — name the opponent's ACTUAL first refuting move (the first move of that line). Encourage "
     "another try; do NOT reveal the right move.\n"
     "- DRILL / SOLVED: celebrate finishing the forcing line and name the key idea that won.\n"
+    "- DRILL / SUSPENDED: they stepped off their own drill line to try a what-if. Answer it honestly, "
+    "as for FREEFORM below, then invite them back to the drill.\n"
     "- FREEFORM: give the honest verdict (a strong move / fine / an inaccuracy / a mistake) grounded in "
     "the facts, say why, and if it was a mistake point toward the better idea.\n"
     "CRITICAL — do NOT invent a mechanism. Only describe what is actually in the given line: if the "
     "refutation is a queen move, do not call it a pawn push; if no piece is trapped in the line, do not "
     "say a piece is trapped; if there is no fork/pin in the line, do not name one. When you are unsure "
-    "how the line works, say plainly that the engine refutes it and the position turns against you — "
+    f"how the line works, say plainly that the engine refutes it and {turns_against} — "
     "never fill the gap with a plausible-sounding motif. Do not add generic strategic advice ('control "
-    "the center', 'develop your pieces') that is not in the facts.\n"
+    # The cliché was quoted as "develop your pieces" — a second person, in a prompt that in freeform
+    # has just banned one. It is only an EXAMPLE of advice not to give, so the wording is incidental
+    # and the neutral form bans exactly the same thing. Cheaper to say it neutrally than to carve an
+    # exception into the check that guards this.
+    "the center', 'develop the pieces') that is not in the facts.\n"
     "Return JSON: {\"text\": string}."
-)
+    )
 
 
 _PIECE_WORD = {"K": "king", "Q": "queen", "R": "rook", "B": "bishop", "N": "knight"}
@@ -275,12 +447,90 @@ class Orchestrator:
         with self.store.bound(session_id):
             return await self._coach_move(uci, pre_fen, result)
 
+    def _history_fens(self) -> list:
+        """The played line as FENs, for the opening lookup.
+
+        Read from the session's own history rather than tracked separately: the book routing is then a
+        pure function of state that already exists and is already persisted — nothing to keep in sync,
+        nothing to resync after a restart, and no "last narrated" latch to go stale.
+
+        KNOWN LIMIT (pre-existing, called out rather than fixed here): `play_move` APPENDS to history
+        and never truncates, so a rewound-and-replayed board leaves the tail of the old line behind and
+        `plies_since_named` counts against a line that was not played. The fold survives it — a wrong
+        name is still a name — but end-of-book can fire early. Fixing it means truncating history on a
+        rewind, which is a board-navigation change, not an opening one.
+        """
+        return [f for p in (self.store._history or []) if (f := (p or {}).get("fen"))]
+
+    def _title_from_opening(self, name: str | None) -> None:
+        """Title an unnamed session after the opening's FAMILY — "Ruy Lopez", not "Ruy Lopez: Morphy
+        Defense, Closed".
+
+        Deterministic, not asked of the model. `_name_hint` exists because the model is the only thing
+        that can look at a position and describe it; here the answer is already KNOWN, and known
+        exactly. Asking would be strictly worse in three ways: it is the most likely titling moment in
+        a session (move one), so a JSON that omits `name` would silently stop titling; the model could
+        invent a name the table did not give; and the narration prompt is deliberately NOT the
+        fact-grounded voice, which is the voice `_name_hint`'s "grounded ONLY in the facts above"
+        assumes. The family rather than the full name because it is what a player calls the game, and
+        it does not read as a truncation.
+        """
+        if name and self.store.session_unnamed:
+            self.store.set_session_name(openings._path(name)[0][:60])
+
+    async def _narrate_move(self, route: str, played: str, pre_fen, verdict: dict, nxt: dict,
+                            book: str | None, prev_book: str | None) -> dict:
+        """The book voice: narrate an opening, or announce that the book has ended.
+
+        A separate arm rather than a flag on the coaching path because it inverts that path at three
+        points at once — length (1-2 sentences -> a paragraph), register (its ban on "generic
+        strategic advice" is precisely what narration IS), and verdict (its "a strong move / fine / an
+        inaccuracy" is the literal source of the "That's a fine move…" this replaces). Loosening the
+        shared prompt to fit would make DRILLS start dispensing "control the center".
+        """
+        mover = _mover(pre_fen)
+        if route == _ENDBOOK:
+            prompt = (f"CONTEXT: {mover} just played {played}, and the line has now left opening "
+                      f"theory.\n\nThe position that follows:\n{_brief(nxt)}\n"
+                      "\nSay that the book has ended, per your instructions. Return JSON.")
+            out = await self._gen_json(_ENDBOOK_SYSTEM, prompt)
+        else:
+            swing = _is_swing(verdict)
+            head = f"CONTEXT: {mover} just played {played}. This move is in a NAMED opening: {book}."
+            if prev_book:
+                head += (f"\nPREVIOUS OPENING NAME (already explained to the reader): {prev_book}. "
+                         f"Write only what this move ADDS to that.")
+            if swing:
+                head += ("\nNOTE: the engine does NOT prefer this move — its class is below. Yet it is "
+                         "theory. THAT tension is the subject: explain what the line gives up and what "
+                         "it gets for it. Do not scold; this is a known opening, not a blunder.")
+            # hide_best is the difference between narration and a verdict. On a quiet book move there
+            # is nothing to judge, and handing over "best: d4" makes the model helpfully report it —
+            # which is the exact register being killed. On a swing the class/best/drop ARE the subject.
+            prompt = (f"{head}\n\nThe move's grounded facts:\n"
+                      f"{_brief_move(verdict, hide_best=not swing)}\n"
+                      + (f"\nThe position that follows:\n{_brief(nxt)}\n" if nxt else "")
+                      + "\nNarrate this per your instructions. Return JSON.")
+            out = await self._gen_json(_narrate_system(prev_book), prompt)
+        if body := (out or {}).get("text"):
+            self.store.append_beats([{"kind": "say", "tone": "teach",
+                                      "segments": [{"text": body}], "stops": False}])
+        self._title_from_opening(book)
+        return {"ok": True, "flow": f"coach_move:{route}", "tokens": self._last_tokens}
+
     async def _coach_move(self, uci: str, pre_fen: str | None, result: dict) -> dict:
         """Coach a move the player JUST played — for drills AND freeform. The move was already
         adjudicated + applied by ctx.play_move (board, opponent reply, history); this adds the LLM's
         grounded voice, TOLD the drill context so it says 'that's the right move, now look for …' or
         'not here — it runs into …, try again'. Runs after play_move (typically as a background task)."""
         in_drill = result.get("drill") is True
+        # ADJUDICATION and VOICE are two questions, and one expression was answering both — wrongly.
+        # `drill` is TRI-state: True / False / "suspended" (the player stepped back inside their OWN
+        # drill line to try a what-if). Only a live drill GRADES a move, so adjudication stays `is
+        # True`. But a suspended drill is still a drill — they are one side, the engine resumes
+        # replying the moment they return to the line — so "you" is right there too. Only an outright
+        # False is freeform. Testing `is not True` for voice made suspended drills speak as freeform.
+        freeform = result.get("drill") is False
         correct = bool(result.get("correct"))
         finished = bool(result.get("finished"))
         wrong_drill = in_drill and not correct
@@ -288,9 +538,23 @@ class Orchestrator:
         try:
             verdict = (await asyncio.to_thread(self.ground.evaluate, pre_fen, [uci])) if pre_fen else {}
             played = (verdict or {}).get("san") or uci
-            # The position they now face (after their move + the opponent's forced reply) — only useful
-            # when the drill continues, so the coach can point at the next idea.
-            nxt = await self._ground(self.store.board_view) if (in_drill and correct and not finished) else {}
+            # Which voice this move gets. Pure + decided BEFORE any further grounding, so the silent
+            # case costs nothing: an in-book move that says nothing new does no analysis and makes no
+            # LLM call.
+            route, book, prev_book = ((_book_route(self._history_fens(), _is_swing(verdict)))
+                                      if freeform else (_COACH, None, None))
+            if route == _SILENT:
+                return {"ok": True, "flow": "coach_move:silent"}
+            # The resulting position. The freeform arm is the LOAD-BEARING part of opening narration:
+            # this gate used to be drill-only, so a freeform move got no position briefing at all and
+            # the opening fact — which is emitted by the fact sheet for the position AFTER the move —
+            # could not reach the model by any route. It costs a full analysis per freeform ply; it
+            # runs on the read-only ground ctx in a detached task, so the board never waits on it.
+            nxt = ({} if route == _ENDBOOK else
+                   await self._ground(self.store.board_view)
+                   if ((in_drill and correct and not finished) or freeform) else {})
+            if route in (_NARRATE, _ENDBOOK):
+                return await self._narrate_move(route, played, pre_fen, verdict, nxt, book, prev_book)
             if in_drill and finished:
                 head = f"CONTEXT: DRILL — SOLVED. You played {played}, completing the forcing line."
                 # Surface the trap the player sidestepped, grounded in the tree (no template beat).
@@ -302,8 +566,21 @@ class Orchestrator:
                 head = f"CONTEXT: DRILL — CORRECT. You played {played}; it is the right move and the drill advances."
             elif wrong_drill:
                 head = f"CONTEXT: DRILL — WRONG. You played {played}; it is NOT the right move here."
+            elif not freeform:
+                # SUSPENDED: `drill` is neither True nor False. Adjudication skipped it (it is not a
+                # live drill move), and the voice code correctly kept "you" — but the head fell through
+                # to the freeform branch below and announced "CONTEXT: FREEFORM move (no drill)" under
+                # a system prompt that had just said this IS a drill. The model was handed both, and
+                # the tri-state's third case was the only one nobody wrote a branch for.
+                head = (f"CONTEXT: DRILL — SUSPENDED. You played {played}, stepping off the drill's "
+                        f"line to try a what-if. It is still your drill and it resumes when the board "
+                        f"returns to it.")
+                if detail := result.get("detail"):
+                    head += f"\n{detail}"
             else:
-                head = f"CONTEXT: FREEFORM move (no drill). You played {played}."
+                # No "you": freeform is a shared analysis board driven from both sides (see
+                # ToolContext.freeform / _perspective). Name the mover instead.
+                head = f"CONTEXT: FREEFORM move (no drill). {_mover(pre_fen)} played {played}."
             # Maia's human-play read of the move ('a common mistake at your level', a find beyond it) —
             # returned by play_move, folded into the coach's voice here instead of its own local beat.
             # When present it's notable, so tell the coach to SURFACE it, not just consider it.
@@ -314,9 +591,11 @@ class Orchestrator:
                          "it credits a find beyond their level, say so.\n") if maia else ""
             prompt = (f"{head}\n\nThe move's grounded facts:\n{_brief_move(verdict, hide_best=wrong_drill)}\n"
                       + maia_line
-                      + (f"\nThe position you now face (after the reply):\n{_brief(nxt)}\n" if nxt else "")
+                      + ((f"\nThe position that follows:\n{_brief(nxt)}\n" if freeform else
+                          f"\nThe position you now face (after the reply):\n{_brief(nxt)}\n")
+                         if nxt else "")
                       + "\nCoach this move per your instructions. Return JSON." + self._name_hint())
-            self._apply_name(out := await self._gen_json(_MOVE_SYSTEM, prompt))
+            self._apply_name(out := await self._gen_json(_move_system(freeform), prompt))
             body = out.get("text")
             if body:
                 good = correct or (not in_drill and (verdict or {}).get("class")
@@ -398,15 +677,28 @@ class Orchestrator:
         best = (hints_res or {}).get("best")
         hints = [h for h in ((hints_res or {}).get("hints") or []) if isinstance(h, str)][:3]
         hypo = await self._hypothetical_facts(fen, text)
-        side = "black" if (fen and " b " in f" {fen} ") else "white"
-        you, opp = side.capitalize(), ("White" if side == "black" else "Black")
+        # Voice follows the MODE, and typed chat is in scope for it: with no drill armed the player is
+        # driving both sides, so "you are playing White" is a claim the board does not support — they
+        # are as likely to play Black's next move. With a drill (live OR suspended) they really are one
+        # side and "you" is correct. Same rule as the played-move path; one predicate, not two.
+        freeform = self.ctx.freeform
+        mover = "Black" if (fen and " b " in f" {fen} ") else "White"
+        other = "White" if mover == "Black" else "Black"
+        if freeform:
+            frame = (f"CONTEXT: analysis board, no drill — the player moves BOTH sides. {mover} is to "
+                     f"move. Do NOT address anyone as 'you' and do NOT treat either colour as the "
+                     f"player's; name the colours. Threats and plans belong to whichever colour owns "
+                     f"them.\n\n")
+        else:
+            frame = (f"You are coaching the player, who is playing {mover} (the side to move). Their "
+                     f"opponent is {other}. Every threat/attack/plan belongs to {other}, never to the "
+                     f"player.\n\n")
         hypo_note = ("\n\nThe player is asking what happens after a SPECIFIC move. Answer DIRECTLY "
                      "(mode='tell'), grounded ONLY in the 'If <move> is played' facts above — never "
                      "invent the resulting evaluation or a continuation that isn't shown." if hypo else "")
         out = await self._gen_json(
-            _COACH_SYSTEM,
-            f"You are coaching the player, who is playing {you} (the side to move). Their opponent is "
-            f"{opp}. Every threat/attack/plan belongs to {opp}, never to the player.\n\n"
+            _coach_system(freeform),
+            frame +
             f"Player said: {text}\n\nEngine's grounded read (coach ONLY from this):\n{_brief(facts)}\n"
             f"Best move (reveal ONLY in a 'tell'): {best}" + hypo + hypo_note
             + "\n\nRespond as JSON." + self._name_hint())

@@ -146,13 +146,25 @@ def _captured_piece(fen: str, uci: str) -> str | None:
         return None
 
 
-def _you_beat(text: str, *, correct: bool | None = None,
-              move: str | None = None, fen: str | None = None) -> dict:
+def _you_beat(text: str, *, correct: bool | None = None, move: str | None = None,
+              fen: str | None = None, notation: str | None = None) -> dict:
     """A player-turn beat — the player's own words (or 'Played <move>' for a board move) shown as a
     right-aligned bubble, so the beats column reads as a conversation, not a coach monologue. On a
     DRILL move, `correct` marks the bubble with a verdict badge (green check / red cross) instead of a
     separate feedback beat; None (freeform / typed text) shows no badge. `move` (SAN) + `fen` (the
-    position right after the move) make the move a clickable chip that snaps the board there."""
+    position right after the move) make the move a clickable chip that snaps the board there.
+
+    `notation` ("1.e4") asks the client to render this move as a NEUTRAL move-list line instead of a
+    "you" bubble — freeform is a shared analysis board where the player drives both sides, so "You
+    played e4" is not a voice choice, it is wrong (see ToolContext.freeform).
+
+    It rides on `kind:"you"` rather than a new `kind:"move"` ON PURPOSE. `Beat.kind` decodes as a free
+    String and the view branches only on `isYou`, so a client that predates this field renders an
+    unknown kind in the COACH lane, labelled LUCENA — the coach appearing to say "1.e4". Beats are
+    persisted, so that would corrupt the stored transcript permanently, and the backend deploys
+    independently of the installed app. An unknown KEY is simply ignored: a new client gets the
+    neutral lane, an old one renders exactly today's bubble. Degrade, don't regress.
+    """
     beat: dict = {"kind": "you", "stops": False, "segments": [{"text": text}]}
     if correct is not None:
         beat["correct"] = bool(correct)
@@ -160,6 +172,8 @@ def _you_beat(text: str, *, correct: bool | None = None,
         beat["move"] = move
     if fen:
         beat["fen"] = fen
+    if notation:
+        beat["notation"] = notation
     return beat
 
 # Point-of-action reminder stamped on every "here's the position" result. A tool
@@ -617,6 +631,19 @@ class ToolContext:
     def _drill(self): return self._sc.drill
     @_drill.setter
     def _drill(self, v): self._sc.drill = v
+
+    @property
+    def freeform(self) -> bool:
+        """No drill is armed — the player is playing/analysing both sides on a shared board.
+
+        DERIVED, never stored: drill-ness is the state (four write sites), and freeform is exactly its
+        complement — a second flag would be a rival copy to drift. But it gets ONE name, because it was
+        spelled three different ways at three call sites and it decides more than adjudication now: it
+        decides the coach's VOICE. In freeform nothing replies (`play_move` applies one ply and stops)
+        and the board has no side-to-move gate, so there is no "you" to address — see `_perspective`.
+        """
+        drill = self._drill
+        return drill is None or drill.finished
 
     def _log_error(self, tool: str, result: dict) -> None:
         """Append one timestamped line per tool error to <home>/errors.log — the local journal
@@ -2132,7 +2159,7 @@ class ToolContext:
             # correct move against a dead position).
             self._reset_drill_line(fen or (self.store._last_board or {}).get("fen"))
             drill = None
-        if drill is None or drill.finished:
+        if drill is None or drill.finished:      # `self.freeform` modulo the local retire above
             self.store.set_input({"kind": "move", "uci": uci, **({"fen": fen} if fen else {})})
             # FREEFORM play is still real state: record it (board + move line, both persisted) so a
             # played-out line survives an app relaunch instead of evaporating with the process.
@@ -2145,9 +2172,13 @@ class ToolContext:
                     plies = list(self.store._history) or [
                         {"n": 0, "san": None, "uci": None, "fen": pre}]
                     plies.append({"n": len(plies), "san": san, "uci": uci, "fen": after})
+                    # `notation` composes the existing PGN renderer over this one ply — "1.e4" /
+                    # "1...c5" — rather than re-deriving move numbers here. The bubble text stays as
+                    # the fallback an older client renders.
                     self.store.append_beats([_you_beat(
                         f"Played {san}" + (f" — takes the {c}" if (c := _captured_piece(pre, uci)) else ""),
-                        move=san, fen=after)])
+                        move=san, fen=after,
+                        notation=_pgn_line([{"san": san, "fen": after}]) or None)])
                     # History BEFORE board: the app anchors orientation on history.first, so writing the
                     # board first (a black-to-move position) would flip the board upside-down for a frame
                     # on the first move (empty history) before history corrects it.
