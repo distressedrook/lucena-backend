@@ -912,7 +912,10 @@ class ToolContext:
         facts = [] if focus in ("eval", "positional") else \
             build_fact_sheet(board, self.engine, top_n=5, **self._probe_lim())
         if focus == "threats":
-            facts = [f for f in facts if f.kind in ("threat", "hanging")]
+            # "opening" survives a threats-only read: it is context for whatever is asked, not a
+            # competing observation, and dropping it means a narrow focus silently loses the one fact
+            # the position cannot re-derive.
+            facts = [f for f in facts if f.kind in ("threat", "hanging", "opening")]
         # cache for board painting (arrows auto-derive from the computed facts —
         # the coach never cites an id; see the analysis/beats design).
         self._facts = {f.id: f for f in facts}

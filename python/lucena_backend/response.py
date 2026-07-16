@@ -162,8 +162,16 @@ def enforce_budget(response: dict, max_tokens: int = MAX_TOKENS) -> dict:
     for line in response.get("lines", []):
         line["pv_san"] = line.get("pv_san", [])[:4]
     # 2) drop facts from the tail (lowest salience — they arrive salience-sorted)
-    while estimate_tokens(response) > max_tokens and response.get("facts"):
-        response["facts"].pop()
+    # The opening fact is exempt: it is APPENDED after the salience sort (facts.build_fact_sheet), so
+    # it is last by construction rather than least important — a tail-drop would make the one fact
+    # that cannot be recomputed from the position the very first thing shed under pressure. It is also
+    # a handful of tokens.
+    while estimate_tokens(response) > max_tokens and \
+            [f for f in response.get("facts", []) if f.get("kind") != "opening"]:
+        for i in range(len(response["facts"]) - 1, -1, -1):
+            if response["facts"][i].get("kind") != "opening":
+                response["facts"].pop(i)
+                break
     # 3) shed positional-read `features` under pressure, least-salient term first,
     # so the piece roster and all five standings (the essential read) survive and
     # only the extra citable specifics are trimmed.
