@@ -199,8 +199,13 @@ class _FakeGround:
 
 
 class _FakeStore:
-    def __init__(self, fens):
-        self._history = [{"n": i, "fen": f} for i, f in enumerate(fens)]
+    def __init__(self, fens, sans=None):
+        # History carries `san` because the real one does (play_move writes it) and the narration
+        # prompt reads it. A fixture that omits it would let `_played_line` silently return "" and the
+        # prompt assertions would pass against an empty line.
+        sans = sans or [None] * len(fens)
+        self._history = [{"n": i, "fen": f, "san": sans[i] if i < len(sans) else None}
+                         for i, f in enumerate(fens)]
         self.board_view = fens[-1]
         self.session_unnamed = True
         self.named = None
@@ -226,9 +231,19 @@ class _FakeCtx:
         self.freeform = freeform
 
 
+def _sans_for(fens: list) -> list:
+    """The SAN of each ply, derived through the real board core (ply 0 has none)."""
+    out = [None]
+    for i in range(1, len(fens)):
+        b = Board(fens[i - 1])
+        san = next((b.san(u) for u in b.legal_moves() if b.apply(u).fen == fens[i]), None)
+        out.append(san)
+    return out
+
+
 def _run(fens, result, verdict=None, freeform=True):
     """Drive `_coach_move` with everything stubbed; return (llm, store)."""
-    store = _FakeStore(fens)
+    store = _FakeStore(fens, _sans_for(fens))
     llm = _CapturingLLM()
     orch = Orchestrator(ctx=_FakeCtx(store, freeform), model="stub", llm=llm,
                         ground_ctx=_FakeGround(verdict))
@@ -441,3 +456,28 @@ def test_the_kings_gambit_actually_triggers_the_swing_fork():
     )
     route, name, _ = _book_route(fens, swing=True)
     assert (route, name) == (_NARRATE, "King's Gambit")
+
+
+def test_the_narration_is_told_exactly_which_moves_exist():
+    """Caught end-to-end on the first real narration: given only 1.e4, the model wrote "Black responds
+    with e5, a classic challenge…" — theory reported as HISTORY, for a move nobody had played.
+
+    It is the carve-out's natural failure mode rather than a random miss: permission to explain an
+    opening reads, from inside the model, as permission to recite its mainline, and the difference is
+    one word ("usually answers" vs "responds"). The prompt-side fix is a tense rule; the fact-side fix
+    is this — name the whole line and say that it IS the whole line, so the rule has something to be
+    checked against instead of being aspirational.
+    """
+    llm, _ = _run(_fens("e2e4"), FREEFORM, verdict={"san": "e4", "class": "ok"})
+    user, system = llm.calls[0]["user"], llm.calls[0]["system"]
+    assert "MOVES SO FAR" in user and "1.e4" in user, "the model was not told what has been played"
+    assert "ENTIRE game" in user, "nothing told the model the line was complete, so a continuation reads as fair game"
+    assert "NEVER write a later move as though it happened" in system, "the tense rule is missing"
+
+
+def test_the_played_line_is_numbered_from_the_history():
+    from lucena_backend.orchestrator import Orchestrator
+    fens = _fens("e2e4", "c7c5", "g1f3")
+    store = _FakeStore(fens, _sans_for(fens))
+    orch = Orchestrator(ctx=_FakeCtx(store), model="stub", llm=_CapturingLLM(), ground_ctx=_FakeGround())
+    assert orch._played_line() == "1.e4 c5 2.Nf3"

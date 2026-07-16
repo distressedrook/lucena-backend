@@ -117,6 +117,35 @@ _NARRATE_SYSTEM_TAIL = (
     "move that is not in the facts you were given. No win%, no centipawns, no invented lines. If you "
     "are unsure whether something is true of THIS position rather than the opening in general, say it "
     "about the opening in general or leave it out.\n"
+    # Caught end-to-end on the very first real narration: given only 1.e4, the model wrote "Black
+    # responds with e5, a classic challenge…" — theory reported as history, for a move nobody had
+    # played. It is the carve-out's failure mode exactly. Permission to explain an opening reads as
+    # permission to narrate its mainline, and the two are one word apart ("usually answers" vs
+    # "responds"), so the ban has to be explicit and has to name the tense.
+    "TENSE — THE ONE THING THAT MAKES THIS A LIE: only the moves listed under MOVES SO FAR have "
+    "actually been played. NEVER write a later move as though it happened — no \"Black responds "
+    "with...\", no \"White then castles\". You are annotating a game in progress, not summarising a "
+    "finished one. A typical continuation may be mentioned ONLY if it is unmistakably marked as "
+    "typical rather than actual: 'Black usually answers...', 'the main line continues...'.\n"
+    # The name is the trap, and it took two failed attempts to see it. The tense rule alone did not
+    # work because the model was not being careless — it was being FAITHFUL. The table names the
+    # position after 1.e4 "King's Pawn Game", and that name conventionally denotes 1.e4 e5; asked to
+    # explain that opening, the model explained the opening the NAME means, which includes Black's
+    # reply. So the instruction has to say that the name runs ahead of the game, not just that the
+    # tense matters.
+    "THE NAME MAY RUN AHEAD OF THE GAME: an opening name often denotes a longer sequence than has "
+    "actually been played — \"King's Pawn Game\" conventionally means 1.e4 e5, but perhaps only 1.e4 "
+    "is on the board. Explain what the moves ACTUALLY PLAYED do and what the side to move is now "
+    "choosing between. The rest of the name's sequence has NOT happened: it is what typically "
+    "follows, and must be written that way or not at all.\n"
+    # Third failure mode, third instruction. Once the model could no longer state a continuation as
+    # fact, it started EXPLORING one instead: given 1.e4 it picked the Caro-Kann — a defence nobody
+    # had chosen — and spent half the paragraph on it. Correctly hedged, entirely irrelevant. The
+    # permission to mention what typically follows needs a budget, or it becomes the subject.
+    "STAY ON THE BOARD: the subject is the position IN FRONT OF YOU. Do not pick one of the opponent's "
+    "possible replies and explore it — you do not know which they will choose, and a paragraph about "
+    "a defence nobody has played is noise. What typically follows is worth AT MOST one clause, and "
+    "only where it explains the move actually played. Never develop a line beyond that.\n"
     "LENGTH: a short paragraph — three or four sentences. This is the one place you are NOT terse.\n"
     "IF YOU ARE GIVEN A PREVIOUS OPENING NAME: the reader already had that explained. Write only what "
     "this move ADDS. If the change is a refinement within the same family, one or two sentences is "
@@ -447,6 +476,25 @@ class Orchestrator:
         with self.store.bound(session_id):
             return await self._coach_move(uci, pre_fen, result)
 
+    def _played_line(self) -> str:
+        """The game so far, as "1.e4 c5 2.Nf3" — the ONE fact that stops the narration inventing moves.
+
+        Without it the prompt's only anchor is the move just played, so "explain this opening" and
+        "recite this opening's mainline" look identical from inside the model — and it recited. Naming
+        the whole line, and saying it IS the whole line, is what makes the tense rule checkable rather
+        than aspirational.
+        """
+        out = []
+        for p in (self.store._history or []):
+            if not (san := (p or {}).get("san")):
+                continue
+            parts = str((p or {}).get("fen", "")).split()
+            full = int(parts[5]) if len(parts) > 5 and parts[5].isdigit() else 1
+            white_moved = (parts[1] if len(parts) > 1 else "w") == "b"
+            num = full if white_moved else full - 1
+            out.append(f"{num}.{san}" if white_moved else (f"{num}...{san}" if not out else san))
+        return " ".join(out)
+
     def _history_fens(self) -> list:
         """The played line as FENs, for the opening lookup.
 
@@ -496,7 +544,9 @@ class Orchestrator:
             out = await self._gen_json(_ENDBOOK_SYSTEM, prompt)
         else:
             swing = _is_swing(verdict)
-            head = f"CONTEXT: {mover} just played {played}. This move is in a NAMED opening: {book}."
+            head = (f"CONTEXT: {mover} just played {played}. This move is in a NAMED opening: {book}.\n"
+                    f"MOVES SO FAR (this is the ENTIRE game; nothing else has been played): "
+                    f"{self._played_line() or played}")
             if prev_book:
                 head += (f"\nPREVIOUS OPENING NAME (already explained to the reader): {prev_book}. "
                          f"Write only what this move ADDS to that.")
