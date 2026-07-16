@@ -136,6 +136,25 @@ class _SocketTap:
         except Exception:          # socket closed / test finished
             pass
 
+    def types_until(self, marker: str, within: float) -> list:
+        """The `type` of every message received, up to and including the one carrying `marker`.
+
+        Returns [] if the marker never arrives. Lets a test assert ORDER, not just delivery.
+        """
+        seen: list = []
+        deadline = time.time() + within
+        while time.time() < deadline:
+            try:
+                m = self._q.get(timeout=0.25)
+            except queue.Empty:
+                continue
+            seen.append(m.get("type"))
+            for beat in (m.get("appended") or m.get("beats") or []):
+                for seg in beat.get("segments", []) or []:
+                    if marker in (seg.get("text") or ""):
+                        return seen
+        return []
+
     def saw_marker(self, marker: str, within: float) -> bool:
         """True as soon as `marker` shows up in anything this socket received."""
         deadline = time.time() + within
@@ -240,4 +259,105 @@ def test_late_read_race(tmp_path):
     assert landed == CHAT_A, (
         f"LATE READ: the parked turn started in {CHAT_A!r} but re-resolved the global cursor at "
         f"write time and wrote into {landed!r}"
+    )
+
+
+@requires_engine
+def test_open_chat_delivers_the_new_chats_snapshot_to_this_socket(tmp_path):
+    """Switching chats must land on the SOCKET, immediately — not on the next reconnect.
+
+    Regression: events are addressed to a chat's subscribers, so a REST call that changes the active
+    chat is invisible to an already-connected socket. The socket has to move itself (`open_chat`), and
+    the server must RETARGET IT BEFORE publishing the new chat's snapshot — publish first and this
+    socket is not in the subscriber set yet, the snapshot goes to nobody, and the app keeps showing
+    the old chat until it reconnects. That is exactly what "new session only appears after a refresh"
+    looks like.
+    """
+    from fastapi.testclient import TestClient
+
+    app = build_app(home=str(tmp_path), llm=_StubLLM(), model="stub")
+    client = TestClient(app)
+    store = app.state.ctx.store
+
+    client.post("/session", json={"session_id": CHAT_A})
+    with client.websocket_connect("/ws") as ws:
+        _drain_ready(ws)
+        # Bank something distinctive in B so B's snapshot is recognisable when it arrives.
+        with store.bound(CHAT_B):
+            store.open_chat(CHAT_B)
+            store.append_beats([{"kind": "say", "stops": False,
+                                 "segments": [{"text": "B-ONLY-SNAPSHOT"}]}])
+
+        tap = _SocketTap(ws)
+        _open_chat(ws, CHAT_B)          # the socket moves itself
+        assert tap.saw_marker("B-ONLY-SNAPSHOT", within=20), \
+            "the socket never received the new chat's snapshot — it would only appear on reconnect"
+
+
+def test_open_chat_baseline_precedes_any_delta_for_the_new_chat(tmp_path):
+    """The socket's FIRST event for the chat it just opened must be `reset` — never a delta.
+
+    Regression on the fix above. Retargeting the socket into B and THEN publishing B's snapshot fixes
+    "the snapshot goes to nobody", but leaves a smaller window: between the retarget and the publish
+    this socket is already a subscriber of B, so a concurrent writer on B (a background coach beat on
+    the chat being opened — routine, not exotic) can enqueue a DELTA ahead of the reset+snapshot. The
+    socket then applies a B delta against its A replica, or drops it as a version gap and shows a
+    stale board. `open_chat_for` closes it by doing the retarget and the baseline as one locked step.
+
+    The interleaving is forced, not slept for: `snapshot` is where `open_chat_for` is mid-operation
+    with the locks held, so the intruding writer is launched from there. It blocks on `_wlock` until
+    the baseline is enqueued — which is the invariant under test. If the lock were dropped (or the
+    steps split again), the intruder's beat lands first and the order assert fails.
+    """
+    from fastapi.testclient import TestClient
+
+    app = build_app(home=str(tmp_path), llm=_StubLLM(), model="stub")
+    client = TestClient(app)
+    store = app.state.ctx.store
+
+    client.post("/session", json={"session_id": CHAT_A})
+
+    intruder_ran = threading.Event()
+    intruder: "list[threading.Thread]" = []
+
+    def _intrude():
+        # A concurrent writer on the chat being opened. Binds explicitly: contextvars do NOT cross a
+        # raw thread, so without this it would write to `_live[""]`.
+        intruder_ran.set()
+        with store.bound(CHAT_B):
+            store.append_beats([{"kind": "say", "stops": False,
+                                 "segments": [{"text": "INTRUDER-DELTA"}]}])
+
+    real_snapshot = store.snapshot
+
+    def snapshot_with_intruder():
+        if not intruder:                       # once — the switch under test, not later snapshots
+            t = threading.Thread(target=_intrude, daemon=True)
+            intruder.append(t)
+            t.start()
+            intruder_ran.wait(timeout=5)       # it is running; it will park on _wlock
+            time.sleep(0.05)                   # give it every chance to get in front of us
+        return real_snapshot()
+
+    with client.websocket_connect("/ws") as ws:
+        _drain_ready(ws)
+        with store.bound(CHAT_B):
+            store.open_chat(CHAT_B)
+            store.append_beats([{"kind": "say", "stops": False,
+                                 "segments": [{"text": "B-BASELINE"}]}])
+
+        store.snapshot = snapshot_with_intruder
+        try:
+            tap = _SocketTap(ws)
+            _open_chat(ws, CHAT_B)
+            order = tap.types_until("INTRUDER-DELTA", within=20)
+        finally:
+            store.snapshot = real_snapshot
+            if intruder:
+                intruder[0].join(timeout=5)
+
+    assert order, "the socket never received the intruding delta — the switch itself did not deliver"
+    assert order[0] == "reset", (
+        f"the socket's first event after opening chat B was {order[0]!r}, not 'reset' — a delta for "
+        f"the new chat arrived before its baseline. Full order: {order}"
     )

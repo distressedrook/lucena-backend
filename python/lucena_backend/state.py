@@ -874,6 +874,48 @@ class StateStore:
     # green across the cursor rewrite is the regression net for the proxy rewiring.
     _switch_current = open_chat
 
+    def open_chat_for(self, sub: Subscription, sid: str) -> str:
+        """Open `sid` FOR ONE SUBSCRIPTION — authorize, activate, retarget, and hand that subscription
+        its new chat's baseline, as one ordered operation. This is the socket's `open_chat` message.
+
+        Why this exists instead of `retarget(); open_chat()` at the call site: those are two steps, and
+        the window between them is a bug. The moment the retarget returns, this socket is a subscriber
+        of `sid` — so any concurrent publisher for `sid` (a background coach beat on the chat being
+        opened) can enqueue a DELTA ahead of the reset+snapshot, and the socket sees a delta for a
+        chat whose baseline it has not been given: applied against the old chat's replica, or dropped
+        as a version gap. Ordering the two calls cannot fix it; only making them one step can.
+
+        The sequence is chosen so each failure lands where it costs least:
+          - `_authorize_chat` FIRST, before the subscription moves — a refused chat leaves this socket
+            exactly where it was, rather than stranded on a chat it may not read.
+          - `_wlock` around snapshot-build + retarget + enqueue, so no writer can mutate the document
+            between the snapshot we build and the baseline we send. Without it the socket could be
+            handed snapshot(N) while delta(N+1) went out to the chat's other watchers just before we
+            joined them — a gap that only a reconnect would heal.
+          - the baseline is addressed to THIS subscription, not published to the chat: the other
+            sockets already on `sid` have their baseline and must not be reset because someone else
+            walked in.
+
+        Lock order is `_wlock` -> `_live_lock`, the same order every writer takes them (a publish under
+        `_wlock` takes `_live_lock` to enqueue). Both are re-entrant.
+        """
+        if not sid:
+            return self.current_sid
+        self._authorize_chat(sid)     # BEFORE bind_current — binding LOADS the document
+        self.bind_current(sid)
+        self._activate(sid)
+        # Seed BEFORE the snapshot is built, so a fresh chat's start board arrives IN the baseline
+        # rather than as a delta chasing it. (Seeding after would also be correct — it publishes to
+        # `sid`, which by then includes us — but it makes the board a separate round trip.)
+        self._seed_start_board()
+        with self._wlock:
+            events = [("reset", {})] + list(self.snapshot())
+            with self._live_lock:
+                self._retarget_locked(sub, sid)
+                for channel, payload in events:
+                    self._enqueue_locked(sid, (sub,), channel, payload)
+        return sid
+
     # -- pub/sub (writer: the coach/app paths; readers: the app's WS connections) ------
     def subscribe(self, sid: str) -> Subscription:
         """Register a subscriber watching chat `sid`. Captures the running loop ALONGSIDE the queue,
@@ -902,12 +944,19 @@ class StateStore:
         if sub.sid == new_sid:
             return
         with self._live_lock:
-            (self._subscribers.get(sub.sid) or {}).pop(sub.queue, None)
-            if not self._subscribers.get(sub.sid):
-                self._subscribers.pop(sub.sid, None)
-            sub.sid = new_sid
-            sub.epoch += 1
-            self._subscribers.setdefault(new_sid, {})[sub.queue] = sub
+            self._retarget_locked(sub, new_sid)
+
+    def _retarget_locked(self, sub: Subscription, new_sid: str) -> None:
+        """The move itself. CALLER MUST HOLD `_live_lock` — see `open_chat_for`, which needs the
+        retarget and the baseline that follows it to be ONE locked step."""
+        if sub.sid == new_sid:
+            return
+        (self._subscribers.get(sub.sid) or {}).pop(sub.queue, None)
+        if not self._subscribers.get(sub.sid):
+            self._subscribers.pop(sub.sid, None)
+        sub.sid = new_sid
+        sub.epoch += 1
+        self._subscribers.setdefault(new_sid, {})[sub.queue] = sub
 
     def _publish(self, channel: str, payload: dict) -> None:
         """Fan a `(channel, payload)` event out to the subscribers of the CURRENTLY BOUND chat.
@@ -932,21 +981,30 @@ class StateStore:
             watchers = self._subscribers.get(sid)
             if not watchers:
                 return
-            # P4a: stamp the monotonic document `version` on every delta (non-mutating shallow copy,
-            # so the stored payload stays clean). The app applies deltas in version order and
-            # reconnects on a gap, so the version MUST come from the publishing chat's own bundle —
-            # read `_live_for(sid)` directly rather than `_version` (which would resolve the caller's
-            # cursor and could stamp a different chat's number, silently making the app DROP it).
-            if isinstance(payload, dict) and "version" not in payload:
-                payload = {**payload, "version": self._live_for(sid).version}
-            # Every event carries the chat + subscription epoch it was enqueued for, so a reader that
-            # has since switched chats can drop it (see Subscription.get).
-            for sub in list(watchers.values()):
-                stamped = (sid, sub.epoch, channel, payload)
-                try:
-                    sub.loop.call_soon_threadsafe(sub.queue.put_nowait, stamped)
-                except RuntimeError:
-                    pass
+            self._enqueue_locked(sid, list(watchers.values()), channel, payload)
+
+    def _enqueue_locked(self, sid: str, subs, channel: str, payload: dict) -> None:
+        """Stamp one event for chat `sid` and enqueue it to exactly `subs`. CALLER MUST HOLD
+        `_live_lock`.
+
+        Split out of `_publish_to` so `open_chat_for` can address ONE subscription instead of a
+        chat's whole watcher set, inside the same locked step as its retarget.
+        """
+        # P4a: stamp the monotonic document `version` on every delta (non-mutating shallow copy,
+        # so the stored payload stays clean). The app applies deltas in version order and
+        # reconnects on a gap, so the version MUST come from the publishing chat's own bundle —
+        # read `_live_for(sid)` directly rather than `_version` (which would resolve the caller's
+        # cursor and could stamp a different chat's number, silently making the app DROP it).
+        if isinstance(payload, dict) and "version" not in payload:
+            payload = {**payload, "version": self._live_for(sid).version}
+        # Every event carries the chat + subscription epoch it was enqueued for, so a reader that
+        # has since switched chats can drop it (see Subscription.get).
+        for sub in subs:
+            stamped = (sid, sub.epoch, channel, payload)
+            try:
+                sub.loop.call_soon_threadsafe(sub.queue.put_nowait, stamped)
+            except RuntimeError:
+                pass
 
     def snapshot(self) -> list[tuple[str, dict]]:
         """The current UI state as `(channel, payload)` events, for replay on (re)connect —

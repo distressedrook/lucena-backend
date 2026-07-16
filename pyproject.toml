@@ -18,7 +18,9 @@ dependencies = [
 ]                             # lucena-engine is installed from the sibling engine/ (editable)
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "python-chess>=1.10"]   # tests/tooling only
+dev = ["pytest>=8.0", "python-chess>=1.10", "httpx>=0.27"]   # tests/tooling only
+                              # httpx: starlette.testclient imports it at construction — without
+                              # it every TestClient test errors out, so it is a hard test dep.
 gemini = ["google-genai>=1.0"]                # the GeminiAdapter provider (lazy-imported)
 
 [tool.setuptools]

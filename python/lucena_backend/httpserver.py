@@ -49,11 +49,10 @@ def _forbidden():
     return JSONResponse({"error": "forbidden"}, status_code=403)
 
 
-def _open_chat_bound(store, sid: str) -> None:
-    """`open_chat` off the loop (it does DB writes). Runs via asyncio.to_thread, which copies the
+def _open_chat_for_bound(store, sub, sid: str) -> None:
+    """`open_chat_for` off the loop (it does DB writes). Runs via asyncio.to_thread, which copies the
     caller's context, so the bind it performs lands where the caller expects."""
-    store.open_chat(sid)
-    store._seed_start_board()
+    store.open_chat_for(sub, sid)
 
 
 def _arm_drill(ctx, store, fen):
@@ -218,18 +217,23 @@ def build_app(*, home: str, llm=None, model: str = _DEFAULT_MODEL,
                 while True:
                     msg = await websocket.receive_json()
                     if msg.get("type") == "open_chat":
-                        # Switch THIS socket to another chat: move its subscription, then bind + snapshot.
                         new_sid = msg.get("session_id")
                         if new_sid and new_sid != sid:
-                            # Under the gate: waits out any in-flight send, so no event dequeued for
-                            # the old chat can still reach this socket once retarget returns.
-                            try:                   # ownership is enforced inside open_chat
-                                await asyncio.to_thread(_open_chat_bound, store, new_sid)
-                            except PermissionError:
-                                continue                   # not this user's chat — ignore the request
+                            # ONE store call, not a sequence: authorize + activate + retarget + this
+                            # socket's baseline are a single ordered operation (see open_chat_for).
+                            # Doing it here as steps is what created both bugs this line has had —
+                            # publishing before the retarget sent the snapshot to nobody; retargeting
+                            # before the publish let a concurrent beat on the destination chat land a
+                            # delta ahead of the baseline. The store owns the order because only the
+                            # store holds the locks that make it atomic.
+                            # `gate` still wraps it: it waits out any in-flight send, so no event
+                            # dequeued for the OLD chat can land after the switch.
                             async with sub.gate:
-                                store.retarget(sub, new_sid)
-                            sid = new_sid
+                                try:
+                                    await asyncio.to_thread(_open_chat_for_bound, store, sub, new_sid)
+                                except PermissionError:
+                                    continue               # not this user's chat — ignore the request
+                                sid = new_sid              # only after the store accepted the move
                         continue
                     # Bind BEFORE spawning: create_task copies the current context, so the task
                     # inherits this chat and cannot re-resolve a different one when it finally writes.
