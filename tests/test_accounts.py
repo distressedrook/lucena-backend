@@ -317,3 +317,42 @@ def test_asking_for_another_users_chat_is_403_not_500(tmp_path, monkeypatch):
     finally:
         monkeypatch.delenv("LUCENA_REQUIRE_AUTH", raising=False)
         importlib.reload(httpserver)
+
+
+# -- register refusals carry a stable code ---------------------------------------
+
+def test_each_register_refusal_has_its_own_code(db):
+    """The CODE is the contract, not the message.
+
+    This used to raise a bare ValueError whose prose went onto the wire as `error`, which left the
+    client choosing between rendering the server's raw string — so any unhandled exception on this
+    path prints itself into the login box — and showing one generic failure for every refusal. A
+    closed set of codes gives it a third option: map what it knows, generalise what it doesn't.
+    """
+    _mkuser(db, "taken@example.com", "correct horse battery staple")
+    cases = [
+        ("", "password123", "missing_fields"),
+        ("a@example.com", "", "missing_fields"),
+        ("a@example.com", "short", "weak_password"),
+        ("not-an-email", "password123", "invalid_email"),
+        ("taken@example.com", "password123", "email_taken"),
+    ]
+    for email, password, code in cases:
+        with pytest.raises(auth.RegisterError) as ei:
+            asyncio.run(auth.register(db, email, password))
+        assert ei.value.code == code, f"{email!r}/{password!r} gave {ei.value.code!r}, want {code!r}"
+        assert str(ei.value), "a code still needs prose beside it, for logs and for curl"
+
+
+def test_registering_a_taken_email_refuses_and_creates_nothing(db):
+    """The dangerous shape this guards, from the client side: signUp DISCARDED the register response
+    and signed in regardless, so "Create account" on an email that already existed — with a password
+    that happened to match — silently signed you into SOMEONE ELSE'S account. The server's job is to
+    refuse distinguishably; the client's is to stop. This pins the server half.
+    """
+    uid = _mkuser(db, "taken@example.com", "correct horse battery staple")
+    with pytest.raises(auth.RegisterError) as ei:
+        asyncio.run(auth.register(db, "taken@example.com", "a-completely-different-password"))
+    assert ei.value.code == "email_taken"
+    user = db.get_user_by_email("taken@example.com")
+    assert user["id"] == uid, "the refused register overwrote the existing user"

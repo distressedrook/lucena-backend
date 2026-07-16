@@ -51,13 +51,37 @@ async def verify_password(password_hash: str, password: str) -> bool:
     return await asyncio.to_thread(_verify)
 
 
+class RegisterError(ValueError):
+    """A register failure the CLIENT is allowed to distinguish, carrying a stable code.
+
+    The code is the contract, not the message. This used to raise a bare ValueError whose prose went
+    onto the wire as `error`, which made the client choose between rendering the server's raw string
+    (so any unhandled exception on this path prints itself into the login box) and showing one generic
+    failure for everything. A closed set of codes gives it a third option: map what it knows, generalise
+    what it does not. The message stays for logs and for a client with no mapping.
+    """
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
+# A floor, not a policy: argon2id handles slow hashing, and length is the only rule that reliably
+# helps without pushing people toward "Passw0rd!". Stated here because register is the only writer.
+_MIN_PASSWORD = 8
+
+
 async def register(db, email: str, password: str) -> str:
-    """Create a user, returning its id. Raises ValueError if the email is taken."""
+    """Create a user, returning its id. Raises RegisterError (with a stable `code`) on refusal."""
     email = (email or "").strip()
     if not email or not password:
-        raise ValueError("email and password are required")
+        raise RegisterError("missing_fields", "email and password are required")
+    if len(password) < _MIN_PASSWORD:
+        raise RegisterError("weak_password", f"password must be at least {_MIN_PASSWORD} characters")
+    if "@" not in email or email.startswith("@") or email.endswith("@"):
+        raise RegisterError("invalid_email", "that does not look like an email address")
     if db.get_user_by_email(email) is not None:
-        raise ValueError("that email is already registered")
+        raise RegisterError("email_taken", "that email is already registered")
     uid = str(uuid.uuid4())
     await asyncio.to_thread(db.create_user, uid, email, await hash_password(password), time.time())
     return uid

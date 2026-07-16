@@ -264,8 +264,12 @@ def build_app(*, home: str, llm=None, model: str = _DEFAULT_MODEL,
     async def register(body: dict):
         try:
             uid = await auth.register(db, body.get("email") or "", body.get("password") or "")
+        except auth.RegisterError as exc:
+            # `error` is the stable CODE the client maps to its own copy; `detail` is prose for a
+            # human reading a log or a curl. The client never renders `detail` — see AuthClient.
+            return JSONResponse({"error": exc.code, "detail": str(exc)}, status_code=400)
         except ValueError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=400)
+            return JSONResponse({"error": "invalid_request", "detail": str(exc)}, status_code=400)
         return {"user_id": uid}
 
     @app.post("/auth/login")
