@@ -1,0 +1,254 @@
+"""Coach mode handler (LLD §1.2, LLD-D) — socratic, board-constrained.
+
+A move = a bit answer; text is classified {answer, whatif, stop, general}. Adjudication is
+deterministic (or LLM-graded free_text), bool-only; "why wrong" is a SEPARATE call. On the
+last required bit clearing: write meta=solved (once), bank mastery (dormant hook today),
+closing beat + poisoned reveal, type-aware "another?" nudge.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextvars
+
+from .bits import BitProgress
+from .grounding import _brief_move, tiered_bit_grounding
+from .handler_base import HandlerBase
+from .lesson import ACTIVE, LessonProgress, puzzle_lesson_id, puzzle_spec
+from .loop import Handled, Open, Outcome, Suspend
+from .mode_prompts import CoachTurnPrompt, PositionQueryPrompt, TrapPrompt, VerdictPrompt
+from .prompts import GradePrompt
+from .strategies import build_registry
+
+# The last coach adjudication result, for a SYNCHRONOUS caller that needs it back — the REST `/move`
+# endpoint the mac app uses (it drives Retry / the poisoned-line button off {drill,correct,finished}).
+# A ContextVar so it is per-execution-context (never crosses chats) and propagates back through the
+# awaited call (await preserves context; the WS fire-and-forget path simply never reads it).
+move_result: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "coach_move_result", default=None)
+
+
+class CoachHandler(HandlerBase):
+
+    def __init__(self, *, ctx, store, llm, model, ground=None):
+        super().__init__(ctx=ctx, store=store, llm=llm, model=model, ground=ground)
+        self._strategies = build_registry(grade_fn=self._grade)
+
+    # -- turn dispatch -----------------------------------------------------------------------------
+    async def handle(self, inp) -> Outcome:
+        lesson = self.store.active_lesson()
+        if lesson is None:                       # defensive: loop only routes here when one is active
+            return Handled()
+        bit = lesson.current_bit()
+        # Working status is owned by the loop (turn boundary), not here — see FreeformHandler.handle.
+        if inp.kind == "present":                 # synthetic entry action (from loop re-route)
+            await self._present_bit(bit)
+            return Handled()
+        if inp.kind == "move":
+            return await self._adjudicate(lesson, bit, inp)
+        j = await self._gen_json(CoachTurnPrompt.system(bit),
+                                 CoachTurnPrompt.prompt(text=inp.text, bit=bit,
+                                                    convo=self._recent(6)))
+        intent = (j.get("intent") or "general").lower()
+        if intent == "answer" and bit.spec.strategy == "free_text":
+            return await self._adjudicate(lesson, bit, inp)
+        if intent == "whatif":
+            return Suspend(then=inp)          # loop → freeform explores; one nudge back
+        if intent == "stop":
+            return Open()                     # loop → freeform home
+        # general: a position question mid-solve → the SHARED PositionQueryPrompt, grounded on
+        # solve_text() so it can't leak the solution. Answer inline, STAY active, nudge back.
+        grounding = await self._ground_for_bit(bit)
+        ans = await self._gen_json(PositionQueryPrompt.system(freeform=False),
+                                   PositionQueryPrompt.prompt(text=inp.text,
+                                                              facts=grounding.solve_text()))
+        self._say(ans.get("text") or "")
+        self._say("Back to it — " + (bit.spec.challenge or "your move."), tone="teach")
+        return Handled()
+
+    # -- adjudication + conclusion -----------------------------------------------------------------
+    async def _adjudicate(self, lesson, bit, inp) -> Outcome:
+        strat = self._strategies.get(bit.spec.strategy)
+        if strat is None:
+            self._say("This exercise type isn't wired yet.")
+            return Handled()
+        if inp.kind == "move" and inp.san is None and inp.fen:      # canonical SAN for adjudication
+            inp.san = self.ground.san_of(inp.fen, inp.uci) or None
+        grounding = await self._ground_for_bit(bit)
+        correct, new_prog, effects = await strat.adjudicate(inp, grounding, bit.spec, bit.progress)
+        lesson.set_bit_progress(bit.index, new_prog)
+        self.store.save_lesson_progress(lesson.progress)
+        self._apply_board_effects(effects)                          # move + auto-played opponent reply
+
+        # Record the result for a synchronous caller (REST /move) BEFORE the slow why-wrong narration,
+        # so the app gets {drill,correct,finished} promptly (the board already moved via the stream).
+        finished = bool(new_prog.cleared and lesson._all_required_cleared())
+        move_result.set({"drill": True, "correct": bool(correct), "finished": finished})
+
+        await self._verdict(inp, grounding, correct)                # symmetric: names the idea / the flaw
+
+        if new_prog.cleared:
+            if finished:
+                return await self._conclude(lesson)
+            lesson.advance_currentBit()
+            self.store.save_lesson_progress(lesson.progress)
+            await self._present_bit(lesson.current_bit())
+        return Handled()
+
+    async def _conclude(self, lesson) -> Outcome:
+        lesson.mark_solved()                       # WRITE-ONCE
+        self.store.save_lesson_progress(lesson.progress)
+        self._bank_mastery(lesson)                 # dormant hook (mastery not wired today)
+        self._say("Solved — nicely done.", tone="praise")
+        # §5 moment 3: the REVEAL is a reveal_on_resolve fact surfaced through §4's tiered grounding —
+        # the same mechanism that withheld it during the solve. The facts stay structured in grounding;
+        # a prompt VOICES them (never `_say` the raw template — that read as a data dump).
+        reveal = tiered_bit_grounding(None, self._lesson_tree(lesson)).reveal_text()
+        if reveal:
+            out = await self._gen_json(TrapPrompt.system(reveal=True),
+                                       TrapPrompt.prompt(facts=reveal))
+            self._say(out.get("text") or reveal, tone="teach")
+        self._say(self._another_nudge(lesson.spec.type), tone="teach", stops=True)
+        return Handled()                           # meta=solved drops it from active → next turn freeform
+
+    @staticmethod
+    def _lesson_tree(lesson) -> dict:
+        for bs in lesson.spec.bits:
+            if bs.strategy == "move_line" and (bs.params or {}).get("tree"):
+                return bs.params["tree"]
+        return {}
+
+    # -- entry / lesson creation -------------------------------------------------------------------
+    async def enter(self, outcome) -> bool:
+        """Create or resume a Lesson and ACTIVATE it in THIS chat (no beats — the loop re-routes a
+        synthetic `present` so the entry action runs in the awaited flow). Returns True if a lesson is
+        now active, False otherwise (not drillable / failed → loop stays in freeform). LLD §8 seam."""
+        src = outcome.source or {}
+        if src.get("kind") == "resume" and src.get("lesson_id"):
+            if self.store.get_lesson(src["lesson_id"]) is None:
+                return False
+            self.store.activate_lesson(src["lesson_id"])      # binds state=active + this chat_id
+            return True
+        return await self._create_from_current(outcome)
+
+    async def _create_from_current(self, outcome) -> bool:
+        """Wrap the CURRENT position as a one-bit puzzle Lesson: reuse the paste-time-cached spec if
+        present (library, position-keyed), else compute the forcing-line tree now (calculation, not
+        authoring) and cache it. Create fresh progress bound to THIS chat, activate. Not drillable →
+        False (freeform keeps the position)."""
+        fen = self.store.board_view
+        if not fen:
+            return False
+        spec = self.store.get_library_spec(puzzle_lesson_id(fen))     # cache hit from the paste nudge
+        if spec is None:
+            preview = await asyncio.to_thread(self.ctx.preview_drill, fen)
+            if not (isinstance(preview, dict) and preview.get("drillable")):
+                return False
+            spec = puzzle_spec(fen, preview["tree"], motif=outcome.motif)
+            self.store.save_lesson_spec(spec)
+        self.store.save_lesson_progress(
+            LessonProgress(lesson_id=spec.id, state=ACTIVE, chat_id=self.store.current_sid,
+                           bits=[BitProgress() for _ in spec.bits]))
+        return True
+
+    async def _present_bit(self, bit) -> None:
+        """Deliver the bit's challenge (authored text, else a placeholder pending co-design), then the
+        §5-moment-1 WARN (from §4's warn_only tier). If a trap is present, ALSO publish it to the app —
+        set the store's poisoned slot + repaint — so the board carries `has_poisoned_line` and the app
+        shows its "show poisoned line" button (and latches the line for reveal)."""
+        self._say(bit.spec.challenge or "Find the best continuation here.", tone="teach", stops=True)
+        tree = (bit.spec.params or {}).get("tree") or {}
+        if tree.get("has_poisoned_line"):
+            warn = tiered_bit_grounding(None, tree).warn_text()
+            if warn:
+                out = await self._gen_json(TrapPrompt.system(reveal=False),
+                                           TrapPrompt.prompt(facts=warn))
+                self._say(out.get("text") or warn, tone="teach")
+            fen = self.store.board_view
+            moves = tree.get("poisoned_line_moves")
+            if fen and moves:
+                self.store.set_poisoned(fen, moves, tree.get("poisoned_line_meta"))
+                self.store.write_board(fen)              # re-project → board.has_poisoned_line = True
+
+    # -- helpers -----------------------------------------------------------------------------------
+    async def _ground_for_bit(self, bit):
+        """Tiered grounding (§4): `solve_text()` (always + warn) is all any solve-time consumer sees;
+        the solution and the trap DETAIL (reveal_on_resolve) are structurally absent."""
+        resp = await self._ground(self.store.board_view)
+        return tiered_bit_grounding(resp, (bit.spec.params or {}).get("tree"))
+
+    async def _grade(self, text, spec, grounding):
+        # solve_text: the free_text grader sees NO reveal content (no solution leak into the grade).
+        facts = grounding.solve_text() if hasattr(grounding, "solve_text") else str(grounding)
+        j = await self._gen_json(GradePrompt.system(), GradePrompt.prompt(text, facts))
+        return bool(j.get("correct")), j
+
+    async def _verdict(self, inp, grounding, correct: bool) -> None:
+        # Symmetric feedback (right names the idea, wrong the flaw). Ground it in the PLAYED MOVE's
+        # actual engine read — NOT `solve_text()`. §4 strips the solution from solve_text() so it can't
+        # leak WHILE solving; but by verdict time the move is already on the board, so grounding "why
+        # it's good/bad" on the move's real read is safe AND necessary — grounding the "right" case on
+        # the stripped facts left the model nothing to explain from, so it invented a rationale.
+        facts = await self._move_facts(inp, correct, grounding)
+        attempt = inp.san or inp.uci or (inp.text or "")
+        out = await self._gen_json(VerdictPrompt.system(correct=correct),
+                                   VerdictPrompt.prompt(attempt=attempt, facts=facts))
+        fallback = "Right — nicely done." if correct else "Not quite — look again."
+        self._say(out.get("text") or fallback, tone="praise" if correct else "correct")
+
+    async def _move_facts(self, inp, correct: bool, grounding) -> str:
+        """Grounding for the verdict. A MOVE answer → the engine's read of the move just played
+        (`evaluate`): the full read when correct (nothing to hide, it is on the board), the refutation
+        with the best move HIDDEN when wrong (explain the flaw without naming the solution). Add the
+        safe positional read (the `always` tier — never the solution) for context. A TYPED answer
+        (free_text, no move) has nothing to evaluate, so it keeps the solve-time facts."""
+        if not inp.uci or not inp.fen:
+            return grounding.solve_text() if hasattr(grounding, "solve_text") else str(grounding)
+        verdict = await asyncio.to_thread(self.ground.evaluate, inp.fen, [inp.uci])
+        if correct:
+            # A best move has no "refutation" — `_brief_move`'s refutation line is the flaw explanation
+            # for a WRONG move; on the right move it reads as if the move were dubious (and VerdictPrompt
+            # deliberately does NOT continue the line on a right answer). Drop it.
+            verdict = {k: v for k, v in verdict.items() if k != "refutation_pv"}
+        move_read = _brief_move(verdict, hide_best=not correct)
+        positional = "\n".join(str(x) for x in getattr(grounding, "always", []) or [])
+        return move_read + (f"\n{positional}" if positional else "")
+
+    def _apply_board_effects(self, effects) -> None:
+        """Move the board to reflect a move_line bit's advance — the player's move AND the walker's
+        auto-played opponent reply — plus the move line, matching the old drill behaviour. History
+        BEFORE board (orientation anchors on history.first; board-first flips it for a frame)."""
+        if not effects:
+            return
+        plies = effects.get("plies")
+        if plies:
+            self.store.write_history(plies)
+        board = effects.get("board")
+        if board:
+            self.store.write_board(board)
+
+    def _bank_mastery(self, lesson) -> None:
+        """Deterministic mastery bank on solve (LLD §2.2). Dormant: ctx.mastery is None today, so this
+        is a structural hook (matches _close_drill's current no-op behavior)."""
+        mastery = getattr(self.ctx, "mastery", None)
+        concept = lesson.spec.concept_id
+        if mastery is not None and concept:
+            try:
+                mastery.record({"type": "recall", "concept": concept, "quality": 1.0,
+                                "resolved": True, "note": "lesson solved"})
+            except Exception:
+                pass
+
+    def _another_nudge(self, type_: str) -> str:
+        return {"puzzle": "Want another puzzle?",
+                "endgame": "Want another endgame?",
+                "opening": "Want to look at another opening?",
+                "midgame": "Want another middlegame position?"}.get(type_, "Want another?")
+
+    def _recent(self, n: int = 6) -> str | None:
+        lines = []
+        for b in (self.store._beats or [])[-n:]:
+            text = "".join(s.get("text", "") for s in (b.get("segments") or []))
+            if text:
+                lines.append(f"{'You' if b.get('kind') == 'you' else 'Coach'}: {text}")
+        return "\n".join(lines) if lines else None

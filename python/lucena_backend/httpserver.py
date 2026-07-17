@@ -14,18 +14,21 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 
 from fastapi import FastAPI, Header, WebSocket, WebSocketDisconnect
 from starlette.responses import JSONResponse
 
 from lucena_engine.uci import Engine
 from . import auth
-from .enginepool import EnginePool, SingleEnginePool, default_size
-from .state import StateStore
-from .db import DB
-from .tools import ToolContext
-from .orchestrator import Orchestrator
-from .quick import QuickCoach
+from .engine_io.enginepool import EnginePool, SingleEnginePool, default_size
+from .persistence.state import StateStore
+from .persistence.db import DB
+from .grounding_tools.tools import ToolContext
+
+# A FEN-like token (7 rank separators then a side-to-move) anywhere in a typed turn → a POSITION
+# set-up rather than chat. Same shape as the orchestrator's own detector.
+_FEN_RE = re.compile(r"(?:[pnbrqkPNBRQK1-8]+/){7}[pnbrqkPNBRQK1-8]+\s+[wb]\b")
 
 _DEFAULT_MODEL = os.environ.get("LUCENA_MODEL", "gemini-flash-lite-latest")
 # Engine pool sizing. Every knob is explicit and env-overridable because the cost is real and per
@@ -96,63 +99,43 @@ def build_app(*, home: str, llm=None, model: str = _DEFAULT_MODEL,
     # MaiaEngine.top_human_moves holds its own lock across the whole conversation — but one predictor
     # per process is deliberate: each instance is a ~485MB torch model.)
     ground_ctx = ToolContext(store=store, pool=pool, maia=None, player_rating=rating)
-    orch = Orchestrator(ctx=ctx, model=model, llm=llm, ground_ctx=ground_ctx)
-    quick = QuickCoach(ctx=ctx, model=model, llm=llm, ground_ctx=ground_ctx)
+
+    # The conversation spine (LLD): one ConversationLoop routes turn+move by mode. It fully REPLACES
+    # the retired Orchestrator/QuickCoach; `_dispatch` routes every turn/move through it. (Prompt
+    # WORDING is still a co-design work-in-progress, but the architecture is the live one.)
+    from .coaching.loop import ConversationLoop, Input as _Input
+    from .coaching.freeform import FreeformHandler
+    from .coaching.coach import CoachHandler
+    from .llm import make_adapter as _make_adapter
+    _spine_llm = llm or _make_adapter({"provider": "gemini", "default_model": model})
+    loop = ConversationLoop(
+        store=store,
+        freeform=FreeformHandler(ctx=ctx, store=store, llm=_spine_llm, model=model, ground=ground_ctx),
+        coach=CoachHandler(ctx=ctx, store=store, llm=_spine_llm, model=model, ground=ground_ctx),
+    )
 
     app.state.store = store
     app.state.ctx = ctx
 
-    _bg_tasks: set = set()
-
-    def _spawn(coro, label: str = "bg", *, session_id: str) -> None:
-        """Fire a coroutine as a tracked background task with error containment — so slow, fallible
-        work (coaching a move via the LLM) never blocks the caller or crashes it on failure.
-
-        `session_id` is explicit because the failure path publishes: a status clear with no chat
-        bound would resolve the cursor empty (or, worse, another chat's) and wipe someone else's
-        spinner.
-        """
-        async def _guarded():
-            try:
-                await coro
-            except Exception as exc:  # noqa: BLE001
-                with store.bound(session_id):
-                    store.publish_status(None)
-                print(f"[bg] {label} failed: {exc!r}", flush=True)
-        task = asyncio.create_task(_guarded())
-        _bg_tasks.add(task)
-        task.add_done_callback(_bg_tasks.discard)
-
-    async def _play_and_coach(uci, fen, *, session_id: str) -> dict:
-        """Apply the move (deterministic: adjudicate, opponent reply, board/history — canned verdict
-        suppressed) then coach it with the LLM in the background (drill-aware: right/wrong + what's
-        next). The move lands instantly; the grounded coaching beat follows a few seconds later."""
-        result = await asyncio.to_thread(ctx.play_move, uci, fen, push_feedback=False)
-        if isinstance(result, dict) and result.get("ok") and uci:
-            # The chat is captured HERE, at dispatch, and handed to the task. coach_move is detached
-            # and can outlive this turn by seconds; resolving the chat when it finally writes would
-            # bind it to whatever is current by then — the late-read race.
-            _spawn(orch.coach_move(session_id, uci, fen, result), label="coach_move",
-                   session_id=session_id)
-        return result
-
     async def _dispatch(msg: dict, sid: str) -> None:
         t = msg.get("type")
         if t == "turn":
-            await orch.run_turn(sid, msg.get("text"))
-        elif t == "explain":
-            await quick.explain(session_id=sid, fen=msg.get("fen"),
-                                move=msg.get("move"), correct=msg.get("correct"))
-        elif t == "position":
+            # A typed turn: a FEN-shaped message is a POSITION set-up (Input.position), everything else
+            # is chat (Input.text). The FEN-detection lives here so the loop sees a resolved kind.
+            text = msg.get("text") or ""
+            inp = (_Input(kind="position", text=text) if _FEN_RE.search(text)
+                   else _Input(kind="text", text=text))
+            await loop.handle_input(sid, inp)
+        elif t == "move":
+            await loop.handle_input(sid, _Input(kind="move", uci=msg.get("uci"), fen=msg.get("fen")))
+        elif t == "position":                       # navigation: report the board being shown (NOT a turn)
             await asyncio.to_thread(store.set_board_view, msg.get("fen"))
         elif t == "view":
             await asyncio.to_thread(store.set_view, msg)
         elif t == "input":
             await asyncio.to_thread(store.set_input, msg.get("data") or msg)
-        elif t == "move":
-            await _play_and_coach(msg.get("uci"), msg.get("fen"), session_id=sid)
-        elif t == "drill":
-            await asyncio.to_thread(_arm_drill, ctx, store, msg.get("fen"))
+        # RETIRED (folded into the loop): `explain` (QuickCoach) → freeform move-explain;
+        # `drill` (old arm path) → coach-mode lesson entry. Both intentionally no longer routed.
 
     async def _handle(msg: dict, sid: str) -> None:
         # The transport has no catch-all: an unhandled error here (an LLM outage, a bad move) would
@@ -171,12 +154,13 @@ def build_app(*, home: str, llm=None, model: str = _DEFAULT_MODEL,
                 }])
             print(f"[_handle] {msg.get('type')} failed: {exc!r}", flush=True)
 
-    # Coach thinking (turn/explain) can take several seconds of LLM+engine work. Running it INLINE in
-    # the receive loop blocks every other message — clicks, navigation, moves all stall until it
-    # finishes, which looks like a frozen app. Those two run as background tasks so the loop keeps
-    # servicing input; the fast, state-mutating messages (move/drill/position/view/input) stay inline
-    # and ordered. The store's tool lock still serializes any shared-state mutation across them.
-    _SLOW = {"turn", "explain"}
+    # Loop work (turn AND move) can take several seconds of LLM+engine work — both now flow through the
+    # unified loop, which may narrate. Running INLINE in the receive loop would block every other
+    # message (clicks, navigation) and look frozen, so both run as background tasks. The fast,
+    # state-mutating messages (position/view/input) stay inline and ordered. The store's per-chat tool
+    # lock still serializes shared-state mutation across them. (The move's fast board-apply happens
+    # early in the handler coroutine, so the board still lands promptly before the slow narration.)
+    _SLOW = {"turn", "move"}
 
     @app.websocket("/ws")
     async def ws(websocket: WebSocket):
@@ -298,7 +282,7 @@ def build_app(*, home: str, llm=None, model: str = _DEFAULT_MODEL,
     @app.get("/sessions")
     async def sessions(session: str | None = None):
         """This user's chats only — un-scoped, the rail would show everyone everyone else's."""
-        from .sessions import list_sessions
+        from .persistence.sessions import list_sessions
         try:
             current = await _rest_sid(session)      # ?session= can name someone else's chat
         except PermissionError:
@@ -332,17 +316,21 @@ def build_app(*, home: str, llm=None, model: str = _DEFAULT_MODEL,
 
     @app.post("/move")
     async def move(body: dict):
-        """Play a move — adjudicated against the live drill (opponent reply + feedback beats stream
-        over the WS), or freeform if no drill is armed. Returns {ok, drill, correct?, finished?}."""
+        """Play a move through the NEW spine (unified entry): coach mode adjudicates it against the
+        live Lesson (opponent reply + beats stream over the WS), freeform explains it. Returns
+        {ok, drill, correct?, finished?} — the mac app drives Retry / the poisoned-line button off
+        this. The result rides a ContextVar set by the coach handler during the awaited call."""
+        from .coaching.coach import move_result
         uci, fen = body.get("uci"), body.get("fen")
         if not uci:
             return JSONResponse({"error": "bad_move"}, status_code=400)
         try:
             sid = await _rest_sid(body.get("session_id"))
-            with store.bound(sid):
-                return await _play_and_coach(uci, fen, session_id=sid)
         except PermissionError:
             return _forbidden()
+        move_result.set(None)
+        await loop.handle_input(sid, _Input(kind="move", uci=uci, fen=fen))
+        return {"ok": True, **(move_result.get() or {"drill": False})}
 
     @app.post("/drill")
     async def drill(body: dict):

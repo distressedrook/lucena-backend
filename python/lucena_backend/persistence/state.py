@@ -354,6 +354,72 @@ class StateStore:
         finally:
             _current_user.reset(token)
 
+    # -- Lessons (coach mode) — per-user PROGRESS + shared CONTENT, both file-backed (LLD §7) ------
+    # Lazy-built so the store has no import cycle with `coaching` at module load, and so plain
+    # in-memory/test stores that never touch lessons pay nothing. Keyed off `current_user` (None =
+    # anonymous), NOT the chat — a lesson's solved/open state is per-PERSON and cross-session.
+    @property
+    def _lesson_store(self):
+        cache = getattr(self, "_lesson_store_cache", None)
+        if cache is None:
+            from ..coaching.lesson_store import LessonStore
+            cache = LessonStore(self.home)
+            self._lesson_store_cache = cache
+        return cache
+
+    @property
+    def library(self):
+        cache = getattr(self, "_library_cache", None)
+        if cache is None:
+            from ..coaching.library import Library
+            cache = Library(self.home)
+            self._library_cache = cache
+        return cache
+
+    def _pair(self, progress):
+        """A full Lesson = shared spec (library) + this user's progress. None if the spec is gone."""
+        if progress is None:
+            return None
+        spec = self.library.get(progress.lesson_id)
+        if spec is None:
+            return None
+        from ..coaching.lesson import Lesson
+        return Lesson(spec=spec, progress=progress)
+
+    def active_lesson(self):
+        """The live coach lesson for THIS CHAT: state==active AND meta is None AND chat_id==current
+        chat (resolve_mode). Per-chat, so a lesson active in another chat doesn't force coach mode
+        here. None → freeform. Paired with its library spec; a dangling progress reads None."""
+        return self._pair(self._lesson_store.active(self.current_user, self.current_sid))
+
+    def activate_lesson(self, lesson_id: str) -> None:
+        """Bind a lesson active to the CURRENT chat (coach entry)."""
+        self._lesson_store.activate(self.current_user, lesson_id, self.current_sid)
+
+    def get_lesson(self, lesson_id: str):
+        return self._pair(self._lesson_store.get(self.current_user, lesson_id))
+
+    def open_lessons(self) -> list:
+        """Resumable items for 'pick up an open item' (state==open, meta None), paired to specs."""
+        return [l for p in self._lesson_store.open_items(self.current_user)
+                if (l := self._pair(p)) is not None]
+
+    def save_lesson_progress(self, progress) -> None:
+        self._lesson_store.put(self.current_user, progress)
+
+    def set_lesson_state(self, lesson_id: str, state: str) -> None:
+        self._lesson_store.set_state(self.current_user, lesson_id, state)
+
+    def save_lesson_spec(self, spec) -> None:
+        self.library.put(spec)
+
+    def get_library_spec(self, lesson_id: str):
+        """A shared content spec by id (cache hit for a paste-time-computed puzzle). No progress."""
+        return self.library.get(lesson_id)
+
+    def lesson_solved(self, lesson_id: str) -> bool:
+        return self._lesson_store.is_solved(self.current_user, lesson_id)
+
     @property
     def _cur(self) -> _Live:
         return self._live_for(self.current_sid)
@@ -653,9 +719,15 @@ class StateStore:
             return None
         self._view_seq += 1
         side = "white" if fen.split()[1] == "w" else "black"
+        pov = snapshot.get("pov")
         obj = {
             "schema": SCHEMA, "seq": self._view_seq, "session": self._current or None,
             "fen": fen, "side_to_move": side,                 # side derived here — never trust the client
+            # The colour the player has the board ORIENTED to (StudySessionScreen.povColor) — what
+            # "I"/"me" means in chat, deliberately independent of whose turn it is or who moved
+            # last. Validated, not trusted blind: anything else collapses to unknown (None), which
+            # the coach prompt treats as "don't guess an identity" rather than a wrong one.
+            "pov": pov if pov in ("white", "black") else None,
             "cursor": int(snapshot.get("cursor") or 0),
             "in_variation": bool(snapshot.get("in_variation")),
             "line": snapshot.get("line") or [],

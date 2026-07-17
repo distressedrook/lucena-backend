@@ -35,7 +35,7 @@ from lucena_engine.positional import analyze_positional
 from lucena_engine import poisoned_line_detector as _poisoned_line_detector
 from . import puzzle_content
 from . import response as R
-from .enginepool import SingleEnginePool
+from ..engine_io.enginepool import SingleEnginePool
 
 # The Stockfish leased to the current guarded call, and that call's nesting depth. Both are
 # ContextVars, not fields: a field would be shared by every chat running concurrently, which is the
@@ -767,6 +767,36 @@ class ToolContext:
         sc.maia_cache_key, sc.maia_cache_val = key, val
         return val
 
+    def human_replies(self, fen: str, rating: int, n: int = 3) -> list:
+        """The `n` moves a player rated `rating` most likely plays in `fen`, as SAN, likeliest first.
+
+        Returns SAN and NOTHING ELSE, on purpose. Maia's rows also carry `cp`/`wdl`, and
+        `top_human_moves` is explicit that those are a prediction of BEHAVIOUR, not a judgement of
+        quality — surfacing them as an evaluation is the one thing you must not do with this model.
+        A caller cannot make that mistake with a list of strings. The type is the guard.
+
+        `rating` is a parameter rather than `self.player_rating` because the two answer different
+        questions. `player_rating` is "who is sitting here" — it powers "a common mistake at your
+        level". Opening narration asks something else entirely: "what do strong players actually play
+        in this position", i.e. what the theory IS. Those want different numbers and must not share one.
+
+        Empty when Maia isn't configured, or on any failure: this decorates a narration, and a missing
+        predictor must cost a clause, never the beat.
+        """
+        if self.maia is None or not fen:
+            return []
+        try:
+            rows = self.maia.top_human_moves(fen, rating, n=n)
+        except Exception:
+            return []
+        out = []
+        for m in rows:
+            try:
+                out.append(Board(fen).san(m["uci"]))
+            except Exception:
+                continue
+        return out
+
     def _maia_block(self, fen: str) -> str | None:
         """A **deterministic plain-text** read of what a player at `currentPlayerRating`
         is likely to play here — computed by us, so the coach reads a sentence, never
@@ -1061,6 +1091,44 @@ class ToolContext:
             if lm.startswith(raw):
                 return lm
         return None
+
+    def san_of(self, fen: str | None, uci: str) -> str:
+        """UCI -> SAN for a move already known to be legal (adjudicated by `play_move`) — pure
+        board notation, not a grounding call: no gate, no budget, no tool classification, so it
+        cannot fail the way `evaluate` can (a probe gate, a budget error, an exception) and leave a
+        caller with nothing but the raw UCI it started from. UCI must NEVER reach the player — SAN
+        is the only notation that goes out over the wire — so this is blank, not `uci`, on the one
+        path (a stale/mismatched fen) that can't compute it either."""
+        if not fen:
+            return ""
+        try:
+            return Board(fen).san(uci)
+        except Exception:
+            return ""
+
+    def named_move(self, fen: str | None, raw: str) -> str | None:
+        """If `raw` (a player's own typed answer — a full sentence, SAN, UCI coordinates, whatever
+        shorthand they used) names a legal move at `fen`, return its real SAN. None otherwise —
+        including when `raw` is prose with no parseable move in it.
+
+        A probe-grading prompt is handed the player's raw text to grade, and a naive prompt just
+        echoes back whatever they typed when it refers to their move. A player who answers with
+        coordinates ('c2d3') gets that UCI-shaped guess quoted straight back at them, dressed up
+        with a fabricated move number — exactly the leak SAN-on-the-wire exists to prevent. Ground
+        their move's real name here so the prompt never has raw UCI to quote in the first place."""
+        if not fen or not raw:
+            return None
+        try:
+            board = Board(fen)
+        except Exception:
+            return None
+        uci = self._resolve_move(board, raw.strip())
+        if uci is None:
+            return None
+        try:
+            return board.san(uci)
+        except Exception:
+            return None
 
     # -- evaluate_and_show (MIXED: classify move(s) AND paint) -----------
     @_guarded
@@ -1396,6 +1464,55 @@ class ToolContext:
             self.store.write_board(end_fen, arrows=arrows, caption=" ".join(played),
                                    eval=resp["eval"])
         return resp
+
+    @_guarded
+    def preview_drill(self, fen) -> dict:
+        """READ-ONLY: build the forcing-line tree for `fen` and report drillability WITHOUT arming or
+        persisting anything (the commit half is coach-mode lesson entry). The new-spine split of the
+        old build-AND-arm: coach mode calls this to decide the puzzle-nudge and to obtain the tree it
+        wraps as a one-bit lesson — a calculation, not content authoring. Deterministic build (same
+        node budgets + single thread as build_and_arm_drill). Returns {drillable, tree, side_to_solve,
+        first_move}; {drillable: False} when it isn't a forcing win / illegal / terminal."""
+        try:
+            board = Board(fen)
+        except Exception:
+            return {"drillable": False}
+        if not board.legal_moves():
+            return {"drillable": False}
+        if self._limit and "nodes" in self._limit:
+            n = self._limit["nodes"]
+            discover, verify = {"nodes": n}, {"nodes": n * 6}
+        else:
+            discover, verify = {"nodes": 45_000}, {"nodes": 180_000}
+        prior_threads = getattr(self.engine, "_threads", 1)
+        force_single = prior_threads != 1
+        if force_single:
+            self.engine._set("Threads", 1)
+        try:
+            tree = build_line_tree(fen, self.engine, discover=discover, verify=verify)
+        finally:
+            if force_single:
+                self.engine._set("Threads", prior_threads)
+        root = tree["root"]
+        if root["kind"] not in ("solve", "mate"):
+            return {"drillable": False}
+        first = root.get("expect_san") or (root["options"][0]["san"] if root.get("options") else None)
+        # Poisoned-line detection — the trap RIDES the tree (has_poisoned_line + the full move sequence
+        # + Maia's motif), exactly as build_and_arm_drill does, so coach mode can WARN at entry and
+        # REVEAL at conclusion. Deterministic, single-threaded poisoned engine; Maia-less → no trap.
+        tree["has_poisoned_line"] = False
+        if self.maia is not None:
+            neng = self._get_poisoned_line_engine() or self.engine
+            nres = self._poisoned_line_or_false(fen, neng, stop_on_first=True)
+            if nres and nres.get("has_poisoned_line") and nres.get("temptations"):
+                top = nres["temptations"][0]
+                moves = self._poisoned_line_moves(fen, top, neng)
+                if moves:
+                    tree["has_poisoned_line"] = True
+                    tree["poisoned_line_moves"] = moves
+                    tree["poisoned_line_meta"] = {"fatal": top.get("fatal"), "idea": top.get("idea")}
+        return {"drillable": True, "tree": tree, "side_to_solve": tree.get("side_to_solve"),
+                "first_move": first, "has_poisoned_line": tree["has_poisoned_line"]}
 
     # -- build_and_arm_drill (MIXED: build the tree AND arm the drill) ----
     @_guarded
@@ -2000,9 +2117,16 @@ class ToolContext:
             parts.append(f"The evaluation of the current position is: {current_verdict}.")
         return " ".join(parts)
 
+    @_guarded
     def _live_verdict(self, fen) -> str | None:
         """A plain-language verdict for `fen` from a quick engine eval — 'White is winning', 'roughly
-        equal', etc. (never a number). None if there's no engine or the eval fails."""
+        equal', etc. (never a number). None if there's no engine or the eval fails.
+
+        `@_guarded` even though it's private: the two internal call sites above are already inside a
+        guarded frame (nested calls reuse that lease — see `_guarded`'s RLock/depth handling), but
+        `_hypothetical_facts` in orchestrator.py also calls this STANDALONE, and `self.engine` raises
+        outside any lease against a real (non-single) EnginePool — the exact crash a 'what if' chat
+        question hit in production, where tests never caught it because they run on a one-engine pool."""
         if not fen or self.engine is None:
             return None
         try:
@@ -2101,10 +2225,9 @@ class ToolContext:
         """Has the board moved OFF the active drill? A live drill keeps the board pinned to
         `drill.current.fen` (every `play()` repaints to the new solve position), so a fresh position —
         or a move played on one — means the coach set up something new WITHOUT a new `build_and_arm_drill`,
-        leaving a stale walker installed. Adjudicating against it rejects correct moves and echoes raw
-        UCI (`Board(stale_fen).san(uci)` raises → the coordinate fallback); the navigator keeps
-        rendering the old line. Detect the divergence by the reported `fen` and, defensively, by the
-        move's legality on the drill's own board."""
+        leaving a stale walker installed. Adjudicating against it rejects correct moves and leaves the
+        navigator rendering the old line. Detect the divergence by the reported `fen` and, defensively,
+        by the move's legality on the drill's own board."""
         d = self._drill
         if d is None or d.finished:
             return False
@@ -2188,11 +2311,11 @@ class ToolContext:
                     pass   # an unreplayable move (stale fen) — input already recorded for the coach
             return {"ok": True, "drill": False}
         pre_fen = drill.current.get("fen") or fen
-        # Name the move (SAN) before adjudicating, so the drill records it in the move line.
-        try:
-            played = Board(pre_fen).san(uci)
-        except Exception:
-            played = uci
+        # Name the move (SAN) before adjudicating, so the drill records it in the move line. Never
+        # `uci` on failure — SAN on the wire is absolute; `drill.play` falls back to its own
+        # `expect_san`/`chosen_san` when this comes back blank, so a stale fen degrades the echo, not
+        # the persisted line.
+        played = self.san_of(pre_fen, uci)
         r = drill.play(uci, played)
         # The player's turn was a board move, not typed text — echo it as "Played <move>" so the
         # beats column stays a conversation. Ground the captured piece here (SAN doesn't name it, so
