@@ -7,7 +7,7 @@ import shutil
 import pytest
 
 from lucena_backend.llm import Completion, Usage
-from lucena_backend.engine_client import EngineClient
+from lucena_backend.engine_io.engine_client import EngineClient
 from lucena_backend.httpserver import build_app
 
 STARTPOS = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"

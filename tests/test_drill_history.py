@@ -1,6 +1,6 @@
 """DrillState move-line accumulation + backtrack truncation (the move navigator's data)."""
 
-from lucena_backend.drill import DrillState
+from lucena_backend.grounding_tools.drill import DrillState
 
 
 def _done(fen):

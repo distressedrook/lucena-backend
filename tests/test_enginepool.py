@@ -10,7 +10,7 @@ import time
 
 import pytest
 
-from lucena_backend.enginepool import EnginePool, SingleEnginePool, default_size
+from lucena_backend.engine_io.enginepool import EnginePool, SingleEnginePool, default_size
 from lucena_engine.uci import EngineError
 
 

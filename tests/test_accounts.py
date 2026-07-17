@@ -13,8 +13,8 @@ import shutil
 import pytest
 
 from lucena_backend import auth
-from lucena_backend.db import DB
-from lucena_backend.state import StateStore
+from lucena_backend.persistence.db import DB
+from lucena_backend.persistence.state import StateStore
 
 _have_sf = bool(os.environ.get("LUCENA_STOCKFISH")) or shutil.which("stockfish")
 requires_engine = pytest.mark.skipif(not _have_sf, reason="no stockfish")

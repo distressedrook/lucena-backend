@@ -35,11 +35,11 @@ import pathlib
 
 import pytest
 
-from lucena_backend.state import StateStore
-from lucena_backend.tools import ToolContext
+from lucena_backend.persistence.state import StateStore
+from lucena_backend.grounding_tools.tools import ToolContext
 
 try:
-    from lucena_backend.db import DB
+    from lucena_backend.persistence.db import DB
 except Exception:  # pragma: no cover - DB optional in some layouts
     DB = None
 

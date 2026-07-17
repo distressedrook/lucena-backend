@@ -35,10 +35,10 @@ from lucena_engine import Board
 from lucena_engine import Engine, Score
 from lucena_engine.facts import Fact
 from lucena_engine.gamepass import run_pass
-from lucena_backend import response as R
-from lucena_backend.state import StateStore
-from lucena_backend.statefile import write_state
-from lucena_backend.tools import ToolContext
+from lucena_backend.grounding_tools import response as R
+from lucena_backend.persistence.state import StateStore
+from lucena_backend.persistence.statefile import write_state
+from lucena_backend.grounding_tools.tools import ToolContext
 
 
 # --------------------------------------------------------------------------
@@ -966,8 +966,8 @@ STALEMATE_FEN = "k7/8/8/8/8/1Q6/8/K7 w - - 0 1"
 
 
 def _fresh_ctx(tmp_path, name, nodes=40_000):
-    from lucena_backend.state import StateStore
-    from lucena_backend.tools import ToolContext
+    from lucena_backend.persistence.state import StateStore
+    from lucena_backend.grounding_tools.tools import ToolContext
     e = Engine(threads=1)
     return e, ToolContext(e, StateStore(str(tmp_path / name)), limit={"nodes": nodes})
 
@@ -1230,7 +1230,7 @@ def test_session_switch_rehydrates_drill_from_the_document(store):
     _SessCtx with drill=None, which makes play_move treat every drill move as freeform and silently
     kills the drill while its tree is still on screen. The walker is a derivation of the document,
     rehydrated on the first access to a session's context."""
-    from lucena_backend.drill import DrillState
+    from lucena_backend.grounding_tools.drill import DrillState
     store._switch_current("A")                     # session A arms a drill (persisted to its document)
     store.write_tree(_NUDGE_TREE)
     store.set_drill_state(DrillState(store._last_tree).to_state())
@@ -1265,7 +1265,7 @@ def test_open_chat_binds_and_loads_each_chat(tmp_path):
     off the OLD session's position) is moot twice over: the analyzer is entirely unwired, and
     publishes are now addressed to a chat rather than fanned out globally.
     """
-    from lucena_backend.db import DB
+    from lucena_backend.persistence.db import DB
     store = StateStore(str(tmp_path), db=DB(str(tmp_path / "lucena_backend.db")))
     store.open_chat("A")
     assert store.current_sid == "A"
@@ -1368,7 +1368,7 @@ def test_undo_move_ignores_a_stale_view(ui_ctx, store):
 def test_conclude_session_marks_complete_and_banks(tmp_path):
     # Close the loop: conclude marks the session complete + returns what was banked (and persists it to
     # the rail). record_observation feeds `banked`; here we bank directly (no mastery engine on ui_ctx).
-    from lucena_backend.db import DB
+    from lucena_backend.persistence.db import DB
     dbpath = str(tmp_path / "lucena_backend.db")
     store = StateStore(str(tmp_path), db=DB(dbpath))
     store.ensure_session_id()
@@ -1386,7 +1386,7 @@ def test_board_view_does_not_leak_across_sessions(tmp_path):
     # The /position transient fen (`board_view`) is the one store-global position field. A NEW session
     # must NOT inherit the previous session's board through it — regression for "started a new session,
     # entered a position, and the coach taught the OLD session's position instead."
-    from lucena_backend.db import DB
+    from lucena_backend.persistence.db import DB
     store = StateStore(str(tmp_path), db=DB(str(tmp_path / "lucena_backend.db")))
     store.write_session_id("sess-A")
     store.set_board_view("r2nrk2/ppp2pp1/3B3p/1Q6/8/2P2N2/PP3PPP/R3K2R w - - 0 1")
@@ -1398,7 +1398,7 @@ def test_board_view_does_not_leak_across_sessions(tmp_path):
 def test_socratic_gate_survives_restart(tmp_path):
     # P2b: the durable gate — a session locked at a probe resumes LOCKED after a process restart
     # (the coach still can't advance), instead of silently reopening the turn.
-    from lucena_backend.db import DB
+    from lucena_backend.persistence.db import DB
     dbpath = str(tmp_path / "lucena_backend.db")
     store = StateStore(str(tmp_path), db=DB(dbpath))
     store.ensure_session_id()
@@ -1419,7 +1419,7 @@ def test_drill_walker_serializes_through_a_backtrack():
     # (a restart) deterministically, incl. mid-line progress, so no move-replay is needed and no
     # progress is lost. A two-defense tree exercises the backtrack (the fragile part).
     import json as _json
-    from lucena_backend.drill import DrillState
+    from lucena_backend.grounding_tools.drill import DrillState
     tree = {"fen": "F0", "side_to_solve": "white", "root": {
         "kind": "solve", "fen": "F0", "expect_uci": "a1a2", "expect_san": "Ra2",
         "after": {"kind": "reply", "fen": "F1", "defenses": [
@@ -1447,7 +1447,7 @@ def test_drill_state_line_has_one_home_the_history(store):
     """Item 8 (regression): the walker's move line is NOT duplicated inside drill_state — it has ONE
     home, the document's history, handed back on restore. Two copies would drift the moment a writer
     touched history without the walker (and the old code preferred the walker's stale copy)."""
-    from lucena_backend.drill import DrillState
+    from lucena_backend.grounding_tools.drill import DrillState
     store.write_tree(_NUDGE_TREE)
     d = DrillState(store._last_tree)
     state = d.to_state()
@@ -1529,7 +1529,7 @@ def test_solve_pushes_poisoned_line_nudge_when_a_trap_was_flagged(ui_ctx, store)
     # A drill whose TREE carries has_poisoned_line=True (set deterministically at build, durable on the
     # document) → solving it pushes a deterministic "there's a poisoned line — ask me" beat. The tree is
     # the ONE source; there is no separate store latch.
-    from lucena_backend.drill import DrillState
+    from lucena_backend.grounding_tools.drill import DrillState
     tree = {**_NUDGE_TREE, "has_poisoned_line": True}   # the drill hid a trap
     store.write_tree(tree)
     ui_ctx._drill = DrillState(tree)
@@ -1540,7 +1540,7 @@ def test_solve_pushes_poisoned_line_nudge_when_a_trap_was_flagged(ui_ctx, store)
 
 
 def test_solve_no_nudge_when_no_trap(ui_ctx, store):
-    from lucena_backend.drill import DrillState
+    from lucena_backend.grounding_tools.drill import DrillState
     store.write_tree(_NUDGE_TREE)                       # latch cleared, never set
     ui_ctx._drill = DrillState(_NUDGE_TREE)
     r = ui_ctx.play_move("e2e4", START)
@@ -1575,7 +1575,7 @@ def test_freeform_poisoned_line_is_durable_across_repaints(store):
 def test_solve_closes_drill_deterministically_without_a_concept(ui_ctx, store):
     # A drill armed with no concept still CLOSES on solve: a one-shot "concluded" note is set (so the
     # coach can be told once) even though there's no mastery engine and no concept to bank.
-    from lucena_backend.drill import DrillState
+    from lucena_backend.grounding_tools.drill import DrillState
     store.write_tree(_NUDGE_TREE)
     ui_ctx._drill = DrillState(_NUDGE_TREE)
     assert store.take_drill_close() is None                 # nothing pending before the solve
@@ -1592,7 +1592,7 @@ def test_solve_closes_drill_deterministically_without_a_concept(ui_ctx, store):
 def test_solve_banks_mastery_deterministically_from_the_drill_concept(store, tmp_path):
     # The whole point: a drill armed with a concept_id banks mastery on solve WITHOUT the LLM — the MCP
     # knows exactly what happened (concept + how cleanly). No record_observation call by the coach.
-    from lucena_backend.drill import DrillState
+    from lucena_backend.grounding_tools.drill import DrillState
     from lucena.mastery import MasteryEngine
     domain_path = os.path.join(
         os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
@@ -1614,7 +1614,7 @@ def test_solve_banks_mastery_deterministically_from_the_drill_concept(store, tmp
 def test_read_input_surfaces_drill_concluded_once_then_clears(ui_ctx, store):
     # The plea half: after a solve, the NEXT read_input tells the coach the drill concluded (so it won't
     # re-praise a finished drill), and only that once — a later turn is clean.
-    from lucena_backend.drill import DrillState
+    from lucena_backend.grounding_tools.drill import DrillState
     store.write_tree(_NUDGE_TREE)
     ui_ctx._drill = DrillState(_NUDGE_TREE)
     ui_ctx.play_move("e2e4", START)
@@ -1631,7 +1631,7 @@ def test_drill_concluded_not_surfaced_on_the_solved_turn(ui_ctx, store):
     # On the DRILL_SOLVED closing turn the coach already handles the solve — a second "concluded/banked"
     # signal is redundant and made it parrot "solved and banked" over the player's actual question. It's
     # consumed anyway (so it can't leak to a later turn), just not surfaced here.
-    from lucena_backend.drill import DrillState
+    from lucena_backend.grounding_tools.drill import DrillState
     store.write_tree(_NUDGE_TREE)
     ui_ctx._drill = DrillState(_NUDGE_TREE)
     ui_ctx.play_move("e2e4", START)                        # solves → mailbox holds the drill_solved event
@@ -1648,7 +1648,7 @@ def test_solve_with_invalid_concept_does_not_claim_a_bank(store, tmp_path):
     # The coach armed a drill with a bad concept id ("hanging-piece" vs "hanging-pieces"); the bank is
     # silently skipped, so drill_close must NOT name the concept — else the coach claims "banked <x>"
     # when nothing was recorded.
-    from lucena_backend.drill import DrillState
+    from lucena_backend.grounding_tools.drill import DrillState
     from lucena.mastery import MasteryEngine
     domain_path = os.path.join(
         os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
@@ -1667,7 +1667,7 @@ def test_reset_to_start_resets_board_drill_and_line(ui_ctx, store):
     # The app's "back to the previous concept" with an empty stack → standard start position: retire the
     # drill, clear the tree, reset the navigator to the start ply, repaint the start board, and flag the
     # board change so the coach re-grounds.
-    from lucena_backend.drill import DrillState
+    from lucena_backend.grounding_tools.drill import DrillState
     start_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
     store.write_tree(_NUDGE_TREE)
     ui_ctx._drill = DrillState(_NUDGE_TREE)
@@ -1754,7 +1754,7 @@ _ENDGAME = "2b5/8/pp4p1/3kP1P1/5K1p/P7/1PB5/8 b - - 2 41"   # best move: h3 (h4h
 
 
 def test_drill_diverged_detects_a_new_position(ui_ctx):
-    from lucena_backend.drill import DrillState
+    from lucena_backend.grounding_tools.drill import DrillState
     ui_ctx._drill = DrillState(_NUDGE_TREE)                # a drill on START
     assert ui_ctx._drill_diverged(_ENDGAME) is True        # a different board
     assert ui_ctx._drill_diverged(START) is False          # the drill's own board
@@ -1765,7 +1765,7 @@ def test_drill_diverged_detects_a_new_position(ui_ctx):
 
 
 def test_reset_drill_line_clears_walker_tree_and_navigator(ui_ctx, store):
-    from lucena_backend.drill import DrillState
+    from lucena_backend.grounding_tools.drill import DrillState
     store.write_tree(_NUDGE_TREE)
     ui_ctx._drill = DrillState(_NUDGE_TREE)
     store.write_history(ui_ctx._drill.line)
@@ -1776,7 +1776,7 @@ def test_reset_drill_line_clears_walker_tree_and_navigator(ui_ctx, store):
 
 
 def test_play_move_retires_stale_drill_when_board_diverged(ui_ctx, store):
-    from lucena_backend.drill import DrillState
+    from lucena_backend.grounding_tools.drill import DrillState
     store.write_tree(_NUDGE_TREE)                          # a drill on START (expects e2e4)…
     ui_ctx._drill = DrillState(_NUDGE_TREE)
     store.write_history(ui_ctx._drill.line)               # …navigator seeded with the START line
@@ -1793,7 +1793,7 @@ def test_play_move_retires_stale_drill_when_board_diverged(ui_ctx, store):
 
 def test_play_move_keeps_a_valid_drill(ui_ctx, store):
     # The guard must NOT false-fire when the move IS on the drill's own board.
-    from lucena_backend.drill import DrillState
+    from lucena_backend.grounding_tools.drill import DrillState
     store.write_tree(_NUDGE_TREE)
     ui_ctx._drill = DrillState(_NUDGE_TREE)
     r = ui_ctx.play_move("e2e4", START)
@@ -1819,7 +1819,7 @@ def test_play_move_off_drill_line_suspends_not_destroys(ui_ctx, store):
     navigated back to try a 'what if') must NOT retire the walker or clear the tree — that is a
     request to explore, not a fact the drill is over. The drill is reported SUSPENDED and resumes
     when the board returns to its position. The old code destroyed the whole drill on the report."""
-    from lucena_backend.drill import DrillState
+    from lucena_backend.grounding_tools.drill import DrillState
     store.write_tree(_TWO_MOVE_TREE)
     ui_ctx._drill = DrillState(store._last_tree)
     store.write_history(ui_ctx._drill.line)
@@ -1838,7 +1838,7 @@ def test_play_move_retires_drill_on_an_unrelated_board(ui_ctx, store):
     """Item 7 (companion): a move on a genuinely UNRELATED position (the coach set up something new,
     off the drill's line entirely) still retires the stale walker and goes freeform — divergence
     within the line suspends; divergence off the line entirely is the coach moving on."""
-    from lucena_backend.drill import DrillState
+    from lucena_backend.grounding_tools.drill import DrillState
     store.write_tree(_NUDGE_TREE)                              # a drill on START…
     ui_ctx._drill = DrillState(_NUDGE_TREE)
     store.write_history(ui_ctx._drill.line)
@@ -2231,7 +2231,7 @@ _PUZZLE_FORK_B = {
 
 
 def _seed_puzzles(tmp_path, monkeypatch, rows):
-    from lucena_backend import puzzle_content as pc
+    from lucena_backend.grounding_tools import puzzle_content as pc
     d = tmp_path / "puzzles"
     d.mkdir()
     (d / "deck.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")

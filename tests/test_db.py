@@ -5,8 +5,8 @@ import tempfile
 
 import pytest
 
-from lucena_backend.db import DB, SCHEMA_VERSION
-from lucena_backend.state import StateStore
+from lucena_backend.persistence.db import DB, SCHEMA_VERSION
+from lucena_backend.persistence.state import StateStore
 
 
 @pytest.fixture
@@ -154,7 +154,7 @@ def test_switch_current_records_named_session(tmp_path):
 
 
 def test_current_session_listed_before_any_transcript(tmp_path):
-    from lucena_backend.sessions import list_sessions
+    from lucena_backend.persistence.sessions import list_sessions
     s = StateStore(str(tmp_path), db=DB(str(tmp_path / "lucena_backend.db")))
     s._switch_current("current-123")
     listed = list_sessions(str(tmp_path), s.db)     # no transcripts on disk → DB is the source
@@ -165,7 +165,7 @@ def test_list_sessions_is_pure_and_refresh_is_noop(tmp_path):
     """Item 12 (regression): list_sessions (used inside snapshot()) is a PURE DB read — no writes.
     In the ADK path there is no Claude transcript, so refresh_session_names is a no-op: the DB `name`
     is authoritative and untouched (transcript-title caching was removed in the pivot)."""
-    from lucena_backend import sessions as S
+    from lucena_backend.persistence import sessions as S
     db = DB(str(tmp_path / "lucena_backend.db"))
     db.upsert_session("A", "New session", now=1.0)
     assert S.list_sessions(str(tmp_path), db)[0]["name"] == "New session"   # pure read: DB untouched
