@@ -629,3 +629,41 @@ def test_position_does_not_clobber_a_rich_view(store):
     v = make_ctx(store).get_view()
     assert v["in_variation"] is True
     assert len(v["variations"]) == 1        # the Nc3 tree survives
+
+
+# ==========================================================================
+# Variation-walk feedback — _walk_target: when a /view triggers an LLM comment
+# ==========================================================================
+from lucena_backend.httpserver import _walk_target   # noqa: E402
+
+
+def test_walk_target_fires_on_a_fresh_variation_move(store):
+    """A /view whose cursor sits on a sideline move (in_variation, kind=='variation') is a walk to
+    comment on — _walk_target returns that move's san/uci/fen."""
+    walk = _walk_target(store, post_view(store, branch_snapshot("A")))
+    assert walk == {"fen": NC3, "san": "Nc3", "uci": "b1c3"}
+
+
+def test_walk_target_silent_on_the_mainline(store):
+    """Scrubbing the mainline (in_variation False) is NOT a walk — no comment."""
+    assert _walk_target(store, post_view(store, mainline_snapshot("A"))) is None
+
+
+def test_walk_target_silent_when_cursor_on_the_mainline_prefix(store):
+    """Inside a variation but with the cursor stepped BACK onto a 'main' row (the prefix the sideline
+    flows out of) → not a walk; only the 'variation' rows speak."""
+    snap = branch_snapshot("A", cursor=1)      # in_variation True, but cursor on e4 (kind 'main')
+    assert _walk_target(store, post_view(store, snap)) is None
+
+
+def test_walk_target_dedupes_a_revisited_move(store):
+    """Once per move landed on: the first /view onto Nc3 fires, a second (stepping back then forward
+    onto the same move) stays silent."""
+    assert _walk_target(store, post_view(store, branch_snapshot("A"))) is not None
+    assert _walk_target(store, post_view(store, branch_snapshot("A"))) is None
+
+
+def test_walk_target_silent_during_an_active_lesson(store):
+    """A walk stays silent while a Lesson owns the chat (a walk is browsing, never a drill answer)."""
+    store.active_lesson = lambda: object()     # pretend a lesson is live
+    assert _walk_target(store, post_view(store, branch_snapshot("A"))) is None

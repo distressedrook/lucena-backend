@@ -32,7 +32,7 @@ class Input:
     """A unified turn input. `kind` decides interpretation; the mode decides meaning (a `move` is
     explain-in-freeform OR adjudicate-in-coach). httpserver builds this from the WS message and does
     the FEN-detection, so `kind == "position"` is already a known-real position."""
-    kind: str                       # "text" | "move" | "position"
+    kind: str                       # "text" | "move" | "position" | "walk"
     text: str | None = None
     uci: str | None = None
     san: str | None = None          # attached server-side for move adjudication (app sends uci)
@@ -112,6 +112,12 @@ class ConversationLoop:
             self.store.set_lesson_state(susp.spec.id, _lesson.ACTIVE)
 
     async def _route(self, inp: Input, *, rerouted: bool = False) -> None:
+        # Walking a variation is FREEFORM-only: it's the shared analysis board moving onto a sideline
+        # move, never a drill answer to adjudicate. The silent-during-a-lesson and once-per-move gates
+        # already ran upstream (only a comment-worthy walk reaches here), so this just reads the move.
+        if inp.kind == "walk":
+            await self.freeform.handle(inp)             # freeform never re-routes a walk
+            return
         handler = self.coach if self._resolve_mode() is Mode.COACH else self.freeform
         outcome = await handler.handle(inp)
         if rerouted or isinstance(outcome, Handled):
