@@ -146,10 +146,12 @@ class VerdictPrompt:
     {text}."""
 
     _RIGHT = (
-        "The player just played the RIGHT move in this coaching exercise. In 2-4 short sentences, teach "
-        "the POINT of the move — grounded ONLY in the facts, warm throughout. Use EVERY specific insight "
-        "the facts give you; do not flatten a rich point to a bare 'nice, that wins the piece'. Cover, "
-        "in order:\n"
+        "The player just played the RIGHT move in this coaching exercise. Teach the POINT of the move — "
+        "grounded ONLY in the facts, warm throughout — as a SHORT BULLETED LIST: put each beat below on "
+        "its OWN \"- \" bullet (one clause each), in order, skipping any beat the facts don't support. If "
+        "only ONE beat applies, a single warm sentence is fine instead of a one-item list. Use EVERY "
+        "specific insight the facts give you; do not flatten a rich point to a bare 'nice, that wins the "
+        "piece'. The beats:\n"
         "(a) CONFIRM it warmly — name the move and that it's right in one clause (the badge already says "
         "correct, so keep this light).\n"
         "(b) THE IDEA — what the move concretely achieves, using the specific facts (a piece won, a "
@@ -165,10 +167,11 @@ class VerdictPrompt:
         "what the played move itself accomplishes and why. Do NOT cite win% or centipawns."
     )
     _WRONG = (
-        "The player just played a move that is NOT the answer. In 2-4 short sentences, explain the flaw "
-        "grounded ONLY in the facts, stay encouraging, and nudge them back toward the idea WITHOUT "
-        "naming the correct move. Use EVERY specific insight the facts give you — do not reduce a rich "
-        "explanation to a bare 'you lose the piece'. Cover, in order:\n"
+        "The player just played a move that is NOT the answer. Explain the flaw grounded ONLY in the "
+        "facts, stay encouraging, and nudge them back toward the idea WITHOUT naming the correct move — "
+        "as a SHORT BULLETED LIST: put each beat below on its OWN \"- \" bullet (one clause each), in "
+        "order, skipping any beat the facts don't support. Use EVERY specific insight the facts give "
+        "you — do not reduce a rich explanation to a bare 'you lose the piece'. The beats:\n"
         "(a) THE IDEA — ONLY if the facts literally contain a phrase crediting the move's idea (e.g. "
         "'would fork the king and the queen — the right idea'), open by acknowledging it warmly. If the "
         "facts do NOT credit an idea, SKIP this beat entirely: do not guess what the player was trying "
