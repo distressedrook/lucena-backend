@@ -29,19 +29,29 @@ status (OPEN / FIXED / WONTFIX).
   > - **The move fails because the pawn on g3, which was the only defender of the knight on f2, is
   >   bypassed by the check.**
   > - Following 2... Nh3+ 3. Kf1 g2+ 4. Kxg2, Black plays 4... Nxf4+, winning your queen…
-- **Defect:** bullet 2 is meaningless. The g3-defends-f2 fact is true but irrelevant to why `Kg1`
-  fails; "is bypassed by the check" is fabricated causality. (Also minor: bullet 3 says `3. Kf1` while
-  the grounded PV says `3. Kh1`, and "leaving the position at 5. Kf3" is awkward.)
+- **Defect A (gloss):** bullet 2 is meaningless. The g3-defends-f2 fact is true but irrelevant to why
+  `Kg1` fails; "is bypassed by the check" is fabricated causality.
+- **Defect B (guard gap?):** bullet 3 says `3. Kf1`, but the grounded PV says `3. Kh1` (both are legal
+  escapes from g1, so `Kf1` isn't illegal — it just deviates from the handed-over line). The catch:
+  `_invented_moves` DOES flag `Kf1` against these facts (verified), so the `_verdict_text` guard should
+  have regenerated. It shipped anyway → either the 00:21 backend predated a fix, or a runtime gap
+  (facts string differs from the reconstruction, warm-engine PV differs, etc.). **Investigate during
+  the regression pass — a hallucinated/deviating move slipping the invention guard is worse than a
+  weak gloss.** Also minor: "leaving the position at 5. Kf3" is awkward filler.
 - **Root cause:** `_deep_tactics` handed over three generic STRUCTURAL facts ("g3 defends f2", "f6
   pinned", "e7 defends d6"), none of which is why `Kg1` loses, under the framing "surface the one that
   explains why simple tries fail." The model force-fit the first into a false "the move fails
   because…". `_why_loses` correctly returned `None` (king move), so nothing grounded the *mechanism*,
   and the deep-tactics structural noise filled the gap.
-- **Candidate fixes (not yet done — logged for the regression pass):**
-  1. Don't feed `_deep_tactics` structural facts to a WRONG verdict when the refutation is already a
-     concrete winning line — the line IS the explanation; the linchpins are noise.
-  2. Or: the `(c) why it works` beat should draw only from `_why_loses`/the refutation, and treat
-     deep-tactics as optional colour, not "why the move fails".
-  3. The real fix is the parked "tactic reason derivation" — derive WHY the fork wins deterministically
-     instead of letting the model narrate the mechanism.
-- **Status:** OPEN.
+- **Fix applied (leniency, commit TBD):** stop *forcing* a "why it fails". Two spots softened:
+  - `_deep_tactics` reframed from "surface the one that explains why simple tries fail" to "BACKGROUND
+    — use one ONLY if it genuinely explains the failure; else IGNORE, don't force a connection".
+  - `_WRONG (c)` now skips when the facts give no exact mechanism: "the refutation line already shows
+    why (wins material or mates)… NEVER manufacture 'the move fails because <structural fact>'".
+  - Live re-run: the g3 bullet is gone; the verdict just shows the fork line. Defect A resolved.
+- **Defect B still a watch item:** the `Kf1`-slips-the-invention-guard question is unproven — the
+  fixed re-run didn't hallucinate a king move, so it may have been an older backend. Re-check if a
+  deviating/illegal move appears in any future verdict.
+- **The deeper fix remains parked:** derive WHY a combination wins deterministically ("tactic reason
+  derivation") so the mechanism is grounded, not narrated.
+- **Status:** Defect A FIXED (leniency); Defect B WATCH.

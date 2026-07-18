@@ -312,8 +312,9 @@ def _deep_tactics(always_lines, solution_moves, live_fen=None) -> str | None:
                     continue
             kept.append(c)
         if kept:
-            return ("Key tactical features of the position — surface the one that explains why simple "
-                    "tries fail (a defensive resource like a saving check, a mutually-defending pair): "
+            return ("Key tactical features of the position (BACKGROUND — defenders, pins, linchpins). "
+                    "Use one ONLY if it genuinely explains why the move fails; if the refutation line "
+                    "already shows the failure, IGNORE these rather than force a connection: "
                     + "; ".join(kept) + ".")
     return None
 
