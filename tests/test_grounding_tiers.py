@@ -12,8 +12,34 @@ from __future__ import annotations
 from lucena_backend.coaching.grounding import (
     TieredFacts, tiered_bit_grounding, _brief_move, _brief_reply, _pv_capture_victims, you_move_beat,
     _swing_phrase, _why_loses, _deep_tactics, _created_threat, _solution_moves, _node_at,
-    _node_solutions, _draws_by_stalemate, _numbered_line,
+    _node_solutions, _draws_by_stalemate, _numbered_line, _undermines_defender,
 )
+
+
+def test_undermines_defender_attack_form():
+    # Rxc5 (g5->c5) lands the rook attacking the c3 knight, which is the ONLY defender of the a2 bishop.
+    # The reasoner derives the causal point: attack the guard → the defended piece can't be held.
+    out = _undermines_defender("r4rk1/p2p2p1/3Np3/2p3R1/5p2/2n2P1P/b1P3PB/R5K1 w - - 0 2", "g5c5")
+    assert out is not None
+    assert "attacks the knight on c3" in out
+    assert "only defender of Black's bishop on a2" in out
+    assert "threatening to win it" in out       # a THREAT, not a categorical 'cannot save both'
+
+
+def test_undermines_defender_remove_form():
+    # Rxc3 (c5->c3) CAPTURES that same knight — the sole defender of the a2 bishop — which then falls.
+    out = _undermines_defender("1r3rk1/p2p2p1/3Np3/2R5/5p2/2n2P1P/b1P3PB/R5K1 w - - 1 3", "c5c3")
+    assert out is not None
+    assert "removes the only defender of Black's bishop on a2" in out
+    assert "which now falls" in out           # a2 is also attacked (by Ra1) → it drops
+    assert "attacks" not in out               # this is the REMOVE form, not the attack form
+
+
+def test_undermines_defender_none_when_no_sole_guard_motif():
+    # A victim with TWO defenders is not 'undermined' by attacking one; a plain capture isn't the motif.
+    assert _undermines_defender("4k3/8/8/8/8/2n1n3/8/3RK3 w - - 0 1", "d1d3") is None
+    assert _undermines_defender("k7/2K5/1P6/8/7p/1rR4p/7P/8 w - - 0 7", "c3h3") is None   # mate puzzle
+    assert _undermines_defender(None, "a1a2") is None
 
 
 def test_numbered_line_is_pgn_style():
