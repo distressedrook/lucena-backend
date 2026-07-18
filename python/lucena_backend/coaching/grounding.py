@@ -29,10 +29,12 @@ _MOVE_NUMBER_RULE = (
 # not duplicated per prompt and inevitably left out of the next one that's added.
 _MARKDOWN_RULE = (
     "FORMATTING: `text` may use light Markdown — **bold** or *italic* for emphasis, and a \"- \" "
-    "bullet per line for a short list of options. Nothing else: no headers, no links, no code "
-    "spans, no nested lists. Most replies need none of this — reach for a bullet list only when "
-    "there are several distinct options to lay out (e.g. several typical replies), and bold only "
-    "the one or two words actually worth the reader's eye.\n"
+    "bullet per line. Nothing else: no headers, no links, no code spans, no nested lists. When your "
+    "reply makes SEVERAL DISTINCT POINTS — separate observations, options, steps, or beats (the "
+    "idea, the refutation, why it fails, the fix) — give each its OWN \"- \" bullet so they read as "
+    "distinct, not one run-on paragraph. Keep each bullet to one clause or short sentence. A reply "
+    "that makes a SINGLE point stays a plain sentence — do not bullet a lone point, and do not split "
+    "one thought across bullets. Bold only the one or two words actually worth the reader's eye.\n"
 )
 
 
