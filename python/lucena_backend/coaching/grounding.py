@@ -17,6 +17,10 @@ _MOVE_NUMBER_RULE = (
     "MOVE NUMBERS: moves you were given already carry their move number — \"12. Nf3\", "
     "\"12... Nf3\" for Black. Keep that exact form when you name them; never write the bare SAN "
     "alone, and never invent a number for a move that wasn't handed to you numbered.\n"
+    "MOVE TOKENS (critical): the ONLY moves you may name are the move the player just played and the "
+    "moves written in the facts. NEVER write any other move — a plausible-looking move that is not "
+    "there (a queen promotion narrated as \"Kb2\") is a hallucination. If you are unsure of a move's "
+    "notation, write \"your move\" / \"the opponent's reply\" instead of guessing it.\n"
 )
 
 # The app renders light Markdown (bold/italic inline, "- " bullet lines) — nothing else. Shared for
@@ -43,7 +47,10 @@ _NO_INVENTION_RULE = (
     "structure, or evaluation. Do NOT name a tactical motif (pin, fork, skewer, discovered attack, "
     "zugzwang, …) or characterize a move (sacrifice, combination, brilliancy) unless the facts use "
     "that word — naming one they do not license is the most common way to be confidently wrong (a "
-    "knight capturing a pawn wins material; it is not a sacrifice). Do NOT attribute a PURPOSE or "
+    "knight capturing a pawn wins material; it is not a sacrifice). Do NOT claim a MATE, a CHECK, or a "
+    "threat against a king that the facts do not state: if the facts describe a repetition, a trade, or "
+    "winning a piece, say exactly THAT — never escalate a quiet line into an attack or a 'mate'. Do NOT "
+    "attribute a PURPOSE or "
     "DIRECTION to a move the facts don't state — not 'heading for the centre', 'bringing the king to "
     "safety', 'an ambitious try', 'developing a piece'. A move to g2 is a move to g2, not a move "
     "'toward the centre'. When the facts don't say WHY, state the concrete consequence they DO give "
