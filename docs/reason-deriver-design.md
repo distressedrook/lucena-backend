@@ -71,13 +71,35 @@ If none classifies, WHY is absent — the REFUTATION line stands alone (P2 lenie
   never invent a field that isn't there" (much of the current conditional prose disappears — the
   fields already encode the conditionality).
 
-## Phases (each its own review-loop pass)
+## Phases — final status
 
-1. **Line-extractor + tests** — robust solution-line walk for both tree kinds. Pure, no LLM. (foundation)
-2. **Mechanism**: add `walks_into`; refactor `_why_loses` to return a typed mechanism, not a sentence.
-3. **IDEA/FIX derivation** gated on the solution line (the P3 fix). Err toward absent.
-4. **Assemble `MoveReason` + render**, retire `_deep_tactics` from verdicts, simplify the prompts.
-5. **Fixtures** from P1/P2/P3 + a handful more; assert the derived FIELDS (deterministic, no LLM).
+1. **Line-extractor + tests** — ✅ DONE, as `_node_at` / `_node_solutions` (position-anchored, searches
+   all branches, counts best moves). Better than the original root-walk plan.
+3. **IDEA/FIX gated on the solution** — ✅ DONE, gated further on `single_solution` (a non-puzzle flow or
+   several best moves stays permissive; a blunder's mechanism is always derived). Fixes P3.
+   *(Retiring `_deep_tactics` from the wrong path — the noise that fed the force-fitting — shipped here
+   too; fixes P2.)*
+
+2. **`walks_into` mechanism + typed `_why_loses`** — ⏸️ NOT DONE, deliberately.
+   - `walks_into` (a derived "why" for a non-capture refutation, e.g. a king move into a fork): the
+     refutation LINE + the leniency (skip the beat when no mechanism) already convey this correctly and
+     read well live (P2). A *derived* mechanism here would have to classify a fork/decisive-threat deep
+     in the PV — fragile, and a WRONG mechanism is exactly the false-cause class this whole effort
+     removed. Low marginal value, real regression risk → left out.
+   - The "typed mechanism" refactor only pays off if Phase 4 lands (nothing else consumes the type), so
+     it's coupled to Phase 4 below.
+4. **Typed `MoveReason` + render + prompt rewrite** — ⏸️ SUPERSEDED. Its purpose was to end the model's
+   *triage* of a motif dump. But Phase 3 already ended the dump (relevance filter), and the current
+   sentence-facts render as clean, correctly-ordered bullets live. A full typed-field rewrite of the
+   load-bearing verdict prompts is now diminishing-returns for real regression risk. Revisit only if a
+   concrete formatting defect appears that the sentence facts can't fix.
+5. **Eval fixtures (P1/P2/P3 → asserted fields)** — ⏸️ DEFERRED to the release checkpoint. This is the
+   verdict-gloss eval (RELEASE_CHECKLIST §5), which the owner parked while pre-production. The P1/P2/P3
+   cases live in `tests/eval/regression-log.md` ready to become fixtures when that harness is built.
+
+**Net:** the phases that fix the logged defects (1 + 3, plus the `_deep_tactics` retirement) shipped and
+are covered by unit tests + two local-review rounds. 2/4/5 are intentionally not built — superseded,
+low-value/high-risk, or owner-deferred — not forgotten.
 
 ## Risks / open questions
 
