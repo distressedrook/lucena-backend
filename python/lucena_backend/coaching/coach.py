@@ -12,11 +12,12 @@ import asyncio
 import contextvars
 
 from .bits import BitProgress
-from .grounding import _brief_move, tiered_bit_grounding
+from .grounding import _brief_move, _brief_reply, tiered_bit_grounding
 from .handler_base import HandlerBase
 from .lesson import ACTIVE, LessonProgress, puzzle_lesson_id, puzzle_spec
 from .loop import Handled, Open, Outcome, Suspend
-from .mode_prompts import CoachTurnPrompt, PositionQueryPrompt, TrapPrompt, VerdictPrompt
+from .mode_prompts import (
+    CoachTurnPrompt, OpponentReplyPrompt, PositionQueryPrompt, TrapPrompt, VerdictPrompt)
 from .prompts import GradePrompt
 from .strategies import build_registry
 
@@ -95,7 +96,20 @@ class CoachHandler(HandlerBase):
         finished = bool(new_prog.cleared and lesson._all_required_cleared())
         move_result.set({"drill": True, "correct": bool(correct), "finished": finished})
 
-        await self._verdict(inp, grounding, correct)                # symmetric: names the idea / the flaw
+        # Two beats on a correct mid-line move: (1) the verdict — what YOU did; (2) the opponent's
+        # auto-played reply — what THEY did. Independent grounding, so generate concurrently (one LLM
+        # round-trip, not two) and say in order. A wrong or line-ending move has no reply.
+        player_color = _color_to_move(inp.fen) if inp.fen else None
+        reply = (effects or {}).get("reply") if correct else None
+        if reply:
+            vtext, rtext = await asyncio.gather(
+                self._verdict_text(inp, grounding, correct, player_color),
+                self._reply_text(reply, player_color))
+            self._say(vtext, tone="praise")
+            self._say(rtext, tone="teach")
+        else:
+            self._say(await self._verdict_text(inp, grounding, correct, player_color),
+                      tone="praise" if correct else "correct")
 
         if new_prog.cleared:
             if finished:
@@ -210,21 +224,28 @@ class CoachHandler(HandlerBase):
         j = await self._gen_json(GradePrompt.system(), GradePrompt.prompt(text, facts))
         return bool(j.get("correct")), j
 
-    async def _verdict(self, inp, grounding, correct: bool) -> None:
+    async def _verdict_text(self, inp, grounding, correct: bool, player_color: str | None) -> str:
         # Symmetric feedback (right names the idea, wrong the flaw). Ground it in the PLAYED MOVE's
         # actual engine read — NOT `solve_text()`. §4 strips the solution from solve_text() so it can't
         # leak WHILE solving; but by verdict time the move is already on the board, so grounding "why
         # it's good/bad" on the move's real read is safe AND necessary — grounding the "right" case on
         # the stripped facts left the model nothing to explain from, so it invented a rationale.
+        # `player_color` (the answer's PRE-move side to move) is the fixed perspective anchor — the
+        # board now shows the opponent to move, so "you play the side to move" flips White/Black.
         facts = await self._move_facts(inp, correct, grounding)
         attempt = inp.san or inp.uci or (inp.text or "")
-        # The answer's FEN is the PRE-move position, so its side to move is the player's own colour —
-        # the fixed anchor the verdict perspective needs (the board itself now shows the opponent).
-        player_color = _color_to_move(inp.fen) if inp.fen else None
         out = await self._gen_json(VerdictPrompt.system(correct=correct, player_color=player_color),
                                    VerdictPrompt.prompt(attempt=attempt, facts=facts))
-        fallback = "Right — nicely done." if correct else "Not quite — look again."
-        self._say(out.get("text") or fallback, tone="praise" if correct else "correct")
+        return out.get("text") or ("Right — nicely done." if correct else "Not quite — look again.")
+
+    async def _reply_text(self, reply: dict, player_color: str | None) -> str:
+        """Voice the opponent's auto-played reply (the second beat). Grounded on `_brief_reply` — the
+        one move, its capture, check — so it states what happened without inventing a plan or motif."""
+        facts = _brief_reply(reply.get("from_fen"), reply.get("san"))
+        out = await self._gen_json(OpponentReplyPrompt.system(player_color=player_color),
+                                   OpponentReplyPrompt.prompt(facts=facts))
+        san = reply.get("san") or ""
+        return out.get("text") or (f"Your opponent replies {san}." if san else "")
 
     async def _move_facts(self, inp, correct: bool, grounding) -> str:
         """Grounding for the verdict. A MOVE answer → the engine's read of the move just played

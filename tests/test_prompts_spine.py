@@ -10,7 +10,7 @@ in live testing, so they get a structural guard.
 from __future__ import annotations
 
 from lucena_backend.coaching.mode_prompts import (
-    FreeformPrompt, PositionQueryPrompt, ReadPrompt, VerdictPrompt, TrapPrompt,
+    FreeformPrompt, OpponentReplyPrompt, PositionQueryPrompt, ReadPrompt, VerdictPrompt, TrapPrompt,
 )
 
 # Stable substrings of the shared fragments (grounding.py). If these move, update here deliberately.
@@ -64,6 +64,13 @@ def test_verdict_anchors_on_the_player_colour_not_side_to_move():
 def test_positionquery_perspective_follows_the_flag():
     assert FREEFORM_VOICE in PositionQueryPrompt.system(freeform=True)
     assert COACH_VOICE in PositionQueryPrompt.system(freeform=False)
+
+
+def test_opponent_reply_is_grounded_reply_only_and_colour_anchored():
+    s = OpponentReplyPrompt.system(player_color="white")
+    assert NO_INVENTION in s, "the reply beat must carry the no-invention rule"
+    assert "you are playing White" in s, "the reply beat anchors on the player's colour too"
+    assert "OPPONENT just played" in s and "Do NOT re-explain the player's own move" in s
 
 
 # -- trap spoil-safety + framing -------------------------------------------------------------------

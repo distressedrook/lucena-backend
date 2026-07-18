@@ -172,6 +172,31 @@ class VerdictPrompt:
         return f"Their move: {attempt}\nGrounded facts (the engine's read of the move they played):\n{facts}\n\nRespond as JSON."
 
 
+class OpponentReplyPrompt:
+    """The SECOND coaching beat after a correct drill move: what the OPPONENT just did in reply. The
+    walker auto-plays the defence; this voices it so the player sees the position move, not just their
+    own move adjudicated. Grounded ONLY in `_brief_reply` (the one move, its capture, check) — it
+    states what happened, never invents a plan or motif the facts don't carry. The player's own move
+    was already voiced by VerdictPrompt; this beat is purely the reply."""
+
+    _BODY = (
+        "In ONE short sentence, in a coaching voice, say what your OPPONENT just played in reply — "
+        "name the move and the CONCRETE thing it does from the facts (a capture, a check, where the "
+        "piece went). Do NOT re-explain the player's own move, do NOT judge the reply, do NOT cite "
+        "win%/centipawns, and do NOT continue the line."
+    )
+
+    @classmethod
+    def system(cls, *, player_color: str | None = None) -> str:
+        return (cls._BODY + "\n" + _NO_INVENTION_RULE
+                + _perspective(freeform=False, player_color=player_color)
+                + _MOVE_NUMBER_RULE + 'Return JSON: {"text": string}.')
+
+    @classmethod
+    def prompt(cls, *, facts: str) -> str:
+        return f"Grounded facts (the engine's read of the opponent's reply):\n{facts}\n\nRespond as JSON."
+
+
 class TrapPrompt:
     """Voices the poisoned-line moments in COACH mode — the WARN before solving (a tempting move
     loses) and the REVEAL after solving (name the trap the player sidestepped and why). Replaces the

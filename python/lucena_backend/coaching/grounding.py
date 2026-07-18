@@ -121,16 +121,19 @@ def _pv_capture_victims(fen: str | None, played_san: str | None, pv: list) -> li
     board so the coach never guesses the victim. A bare SAN ("Rxe1") names the mover and the square
     but not what stands on it; handed only that, the model invented the captured piece (a live verdict
     called the rook on e1 a 'knight'). Aligned to `pv`; None where a move is not a capture or can't be
-    resolved (bad FEN, en-passant, an out-of-line SAN)."""
-    if not fen or not played_san:
+    resolved (bad FEN, en-passant, an out-of-line SAN). `played_san` steps the board once before
+    walking `pv` (the refutation hangs off the played move); pass None to walk `pv` straight from
+    `fen` (e.g. a single reply already played FROM `fen`)."""
+    if not fen:
         return [None] * len(pv)
     try:
         from lucena_engine.board import Board
         b = Board(fen)
-        played = next((m for m in b.legal_moves() if b.san(m) == played_san), None)
-        if played is None:
-            return [None] * len(pv)
-        b = b.apply(played)                       # step into the position the refutation hangs off
+        if played_san is not None:
+            played = next((m for m in b.legal_moves() if b.san(m) == played_san), None)
+            if played is None:
+                return [None] * len(pv)
+            b = b.apply(played)                   # step into the position the refutation hangs off
         victims: list = []
         for san in pv:
             uci = next((m for m in b.legal_moves() if b.san(m) == san), None)
@@ -238,6 +241,29 @@ def _brief_move(v: dict, *, hide_best: bool = False) -> str:
                    f"the refuting move is the opponent's {first}, a {piece} move, nothing else. Name a "
                    f"captured piece ONLY as written here — never guess what stands on a square.")
     return "\n".join(out)
+
+
+def _brief_reply(from_fen: str | None, san: str | None) -> str:
+    """Grounding for the opponent's auto-played reply in a drill — a factual read of the ONE move,
+    so the coach's second beat ('what the opponent did') is grounded and can't invent a piece,
+    capture, or motif. Numbered off `from_fen` (the position the reply was played from), with the
+    captured piece resolved on a board and check/mate flagged. Deterministic — no engine call."""
+    if not from_fen or not san:
+        return "(no reply read available)"
+    numbered = _numbered(san, from_fen)
+    piece = _PIECE_WORD.get(san.rstrip("+#")[:1], "pawn")
+    dest = san.rstrip("+#")[-2:]
+    victim = _pv_capture_victims(from_fen, None, [san])[0]
+    lines = [f"The opponent (the side NOT the player) has just replied with {numbered}."]
+    if victim:
+        lines.append(f"It is a {piece} that captures the player's {victim} on {dest}.")
+    else:
+        lines.append(f"It is a {piece} moving to {dest} (no capture).")
+    if san.endswith("#"):
+        lines.append("It delivers checkmate.")
+    elif san.endswith("+"):
+        lines.append("It gives check.")
+    return "\n".join(lines)
 
 
 def _brief(resp: dict) -> str:

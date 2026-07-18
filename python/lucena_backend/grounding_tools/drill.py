@@ -143,7 +143,8 @@ class DrillState:
         feedback = drill_feedback.correct_beat(self._bump("correct"))
         board, event, extra, finished = self._advance(chosen_then)
         return {"correct": True, "board": board, "feedback": feedback,
-                "extra": extra, "finished": finished, "event": event, "plies": list(self.line)}
+                "extra": extra, "finished": finished, "event": event, "plies": list(self.line),
+                "reply": (event or {}).get("reply")}   # the opponent's auto-played reply, if any
 
     def _advance(self, node: dict | None):
         # `node` is the position after your move. For a non-reply node (a one-move win → `done`),
@@ -159,7 +160,10 @@ class DrillState:
             self.current = first["then"]
             fen = first["then"].get("fen")
             self._add_ply(first.get("san"), first.get("uci"), fen)   # the opponent's defense
-            return fen, {"kind": "drill", "event": "solved", "fen": fen}, None, False
+            # Surface the reply so the coach can voice it as its own beat: the move, and the position
+            # it was played FROM (this reply node's fen — after the player's move, before the reply).
+            reply = {"san": first.get("san"), "uci": first.get("uci"), "from_fen": node.get("fen")}
+            return fen, {"kind": "drill", "event": "solved", "fen": fen, "reply": reply}, None, False
         # No further move to find — your move was the last. Show the position after it, then finish.
         return self._next_or_finish(board=node.get("fen"))
 

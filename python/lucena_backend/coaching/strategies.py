@@ -54,7 +54,8 @@ class MoveLineStrategy:
                            strategy_state=walker.to_state(), cleared=walker.finished)
         # Board effects: the position AFTER the player's move + the walker's auto-played opponent
         # reply, plus the full move line — so the handler moves the board (and shows the reply).
-        effects = {"board": result.get("board"), "plies": result.get("plies")}
+        effects = {"board": result.get("board"), "plies": result.get("plies"),
+                   "reply": result.get("reply")}   # the opponent's auto-played reply → its own beat
         return bool(result.get("correct")), new_prog, effects
 
 

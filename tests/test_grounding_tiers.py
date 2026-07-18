@@ -10,7 +10,7 @@ solve-time text and ARE in the reveal-time text.
 from __future__ import annotations
 
 from lucena_backend.coaching.grounding import (
-    TieredFacts, tiered_bit_grounding, _brief_move, _pv_capture_victims,
+    TieredFacts, tiered_bit_grounding, _brief_move, _brief_reply, _pv_capture_victims,
 )
 
 # A move_line tree carrying a poisoned line, shaped exactly as preview_drill emits it.
@@ -154,6 +154,21 @@ def test_brief_move_wrong_names_the_captured_piece_not_a_guess():
     s = _brief_move(v, hide_best=True)
     assert "captures the rook on e1" in s, "the victim must be named, not left for the model to guess"
     assert "[takes the rook]" in s
+
+
+def test_brief_reply_grounds_the_opponent_reply():
+    # The recapture 1... cxd5 (Black) takes the queen the player just sacrificed on d5.
+    from_fen = "1k5r/4q3/1pp5/3QNp2/6p1/P5P1/1P3P2/4RK2 b - - 0 1"
+    s = _brief_reply(from_fen, "cxd5")
+    assert "1... cxd5" in s, "the reply must be numbered as Black's"
+    assert "captures the player's queen on d5" in s, "the victim must be resolved, not guessed"
+    assert "opponent" in s.lower()
+
+
+def test_brief_reply_flags_check_and_degrades():
+    assert "gives check" in _brief_reply("8/8/8/8/8/8/5k2/4R1K1 w - - 0 1", "Re2+")
+    assert _brief_reply(None, "cxd5") == "(no reply read available)"
+    assert _brief_reply("x", None) == "(no reply read available)"
 
 
 def test_brief_move_handles_error_and_empty():
