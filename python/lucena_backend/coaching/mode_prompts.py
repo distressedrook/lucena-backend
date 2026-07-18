@@ -159,11 +159,13 @@ class VerdictPrompt:
     )
 
     @classmethod
-    def system(cls, *, correct: bool) -> str:
-        # Coach perspective: the player IS the side to move, so "you" is correct here (not freeform).
+    def system(cls, *, correct: bool, player_color: str | None = None) -> str:
+        # Coach perspective anchored on the player's actual COLOUR, not "the side to move": by verdict
+        # time the move is on the board, so the board shows the OPPONENT to move — "you play the side
+        # to move" made the model read the board and flip White/Black. `player_color` fixes the anchor.
         return ((cls._RIGHT if correct else cls._WRONG) + "\n"
-                + _NO_INVENTION_RULE + _perspective(freeform=False) + _MOVE_NUMBER_RULE
-                + 'Return JSON: {"text": string}.')
+                + _NO_INVENTION_RULE + _perspective(freeform=False, player_color=player_color)
+                + _MOVE_NUMBER_RULE + 'Return JSON: {"text": string}.')
 
     @classmethod
     def prompt(cls, *, attempt: str, facts: str) -> str:

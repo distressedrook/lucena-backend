@@ -49,6 +49,18 @@ def test_verdict_is_coach_perspective():
     assert COACH_VOICE in s and FREEFORM_VOICE not in s
 
 
+def test_verdict_anchors_on_the_player_colour_not_side_to_move():
+    # By verdict time the move is on the board, so the board shows the OPPONENT to move — telling the
+    # model "you play the side to move" made it read the board and flip White/Black. Given the colour,
+    # the prompt must name it outright and forbid inferring it from whose turn it is.
+    w = VerdictPrompt.system(correct=False, player_color="white")
+    assert "you are playing White" in w
+    assert "do NOT infer your colour from whose turn it is" in w
+    assert "the side to move" not in w, "the colour anchor must replace the flip-prone 'side to move'"
+    b = VerdictPrompt.system(correct=False, player_color="black")
+    assert "you are playing Black" in b and "your OPPONENT is White" in b
+
+
 def test_positionquery_perspective_follows_the_flag():
     assert FREEFORM_VOICE in PositionQueryPrompt.system(freeform=True)
     assert COACH_VOICE in PositionQueryPrompt.system(freeform=False)

@@ -48,7 +48,7 @@ _NO_INVENTION_RULE = (
 )
 
 
-def _perspective(freeform: bool) -> str:
+def _perspective(freeform: bool, player_color: str | None = None) -> str:
     """The voice block: who the coach is talking to.
 
     Two bodies, one function, because the answer is a property of the MODE and it appears in many
@@ -59,6 +59,12 @@ def _perspective(freeform: bool) -> str:
     stops, and the board has no side-to-move gate, so either colour is draggable. The player is
     driving both sides of an analysis board: there is no "you" to address, only White and Black.
     Saying "you played e4" there is not a style choice, it is factually wrong.
+
+    `player_color` names the player's actual colour (a verdict knows it — the answer's FEN is the
+    pre-move position, whose side to move IS the player). Passing it replaces the fragile "you play
+    the side to move" with a fixed anchor: by verdict time the move is already on the board, so the
+    board shows the OPPONENT to move — a model told "you are the side to move" reads the board, sees
+    the opponent's turn, and flips the whole perspective. Naming the colour outright kills that.
     """
     if freeform:
         return (
@@ -71,6 +77,21 @@ def _perspective(freeform: bool) -> str:
             "attribute a move or plan to 'the player'. Threats and plans belong to the colour that "
             "owns them. Before finishing, re-read `text`: if it contains 'you', 'your', or 'yours', "
             "rewrite that sentence naming the colour instead.\n"
+        )
+    if player_color:
+        c = player_color.capitalize()
+        opp = "Black" if player_color == "white" else "White"
+        you_num = "N." if player_color == "white" else "N..."
+        opp_num = "N..." if player_color == "white" else "N."
+        return (
+            f"PERSPECTIVE (critical — getting it backwards ruins the read): YOU are the player and you "
+            f"are playing {c}. Address the player as 'you'. YOUR moves are {c}'s moves, written "
+            f"'{you_num}' (e.g. '5. Nf3' is White, '5... Nf3' is Black); your OPPONENT is {opp}, whose "
+            f"moves are written '{opp_num}'. You have ALREADY made your move, so the board now shows "
+            f"your OPPONENT to move — do NOT infer your colour from whose turn it is; you are {c}, "
+            f"period. Every threat, attack, or plan by {opp} belongs to the OPPONENT — never say you "
+            f"are threatening your own pieces or defending against yourself. When a line labels a move "
+            f"'(you)' or '(opponent)', trust that label exactly and never swap the two.\n"
         )
     return (
         "PERSPECTIVE (critical — getting it backwards ruins the read): address the player as 'you'; "

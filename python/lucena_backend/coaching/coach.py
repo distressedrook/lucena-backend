@@ -28,6 +28,15 @@ move_result: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
     "coach_move_result", default=None)
 
 
+def _color_to_move(fen: str) -> str | None:
+    """"white"/"black" from a FEN's active-colour field, or None if unreadable. In a verdict the
+    answer's FEN is the PRE-move position, so this is the player's own colour."""
+    parts = (fen or "").split()
+    if len(parts) < 2 or parts[1] not in ("w", "b"):
+        return None
+    return "white" if parts[1] == "w" else "black"
+
+
 class CoachHandler(HandlerBase):
 
     def __init__(self, *, ctx, store, llm, model, ground=None):
@@ -209,7 +218,10 @@ class CoachHandler(HandlerBase):
         # the stripped facts left the model nothing to explain from, so it invented a rationale.
         facts = await self._move_facts(inp, correct, grounding)
         attempt = inp.san or inp.uci or (inp.text or "")
-        out = await self._gen_json(VerdictPrompt.system(correct=correct),
+        # The answer's FEN is the PRE-move position, so its side to move is the player's own colour —
+        # the fixed anchor the verdict perspective needs (the board itself now shows the opponent).
+        player_color = _color_to_move(inp.fen) if inp.fen else None
+        out = await self._gen_json(VerdictPrompt.system(correct=correct, player_color=player_color),
                                    VerdictPrompt.prompt(attempt=attempt, facts=facts))
         fallback = "Right — nicely done." if correct else "Not quite — look again."
         self._say(out.get("text") or fallback, tone="praise" if correct else "correct")
