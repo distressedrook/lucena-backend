@@ -231,6 +231,67 @@ def _deep_tactics(always_lines, solution_moves) -> str | None:
     return None
 
 
+def _number_full_line(pre_fen: str | None, sans: list) -> str:
+    """Number a line whose FIRST move is the PLAYER's (unlike `_numbered_line`, which starts with the
+    opponent's refutation) — '7. Rc1 7... Rc3+ 8. Rxc3'. Off the pre-move FEN's number + side."""
+    parts = (pre_fen or "").split()
+    num = int(parts[5]) if len(parts) > 5 and parts[5].isdigit() else 1
+    white = (parts[1] if len(parts) > 1 else "w") == "w"
+    out = []
+    for s in sans:
+        out.append(f"{num}. {s}" if white else f"{num}... {s}")
+        if not white:
+            num += 1
+        white = not white
+    return " ".join(out)
+
+
+def _draws_by_stalemate(pre_fen: str | None, uci: str | None, pv: list) -> str | None:
+    """Level-2 deriver: does this move THROW THE WIN by walking into a STALEMATE (a draw)? Play the
+    move, then the engine's forced refutation line, and check each resulting position for stalemate —
+    no legal move AND not in check. Purely deterministic (`Board.legal_moves`/`in_check`), so the coach
+    GROUNDS the stalemate; it never infers it from a bare draw eval. Returns the sentence or None.
+
+    This is the fact that explains an "everything-else-draws" endgame: e.g. Rc1 Rc3+ Rxc3 and Black,
+    king boxed and pawns frozen, has no move — stalemate — while the winning move leaves the opponent a
+    spare tempo. Names the stalemated colour and the line, never the solution move."""
+    if not pre_fen or not uci:
+        return None
+    try:
+        from lucena_engine.board import Board
+        start = Board(pre_fen)
+        played = next((start.san(m) for m in start.legal_moves() if m == uci), None)
+        if played is None:
+            return None
+        b = start.apply(uci)
+
+        def is_stalemate(bd) -> bool:
+            return not bd.legal_moves() and not bd.in_check
+
+        line = [played]
+        if is_stalemate(b):                                   # the move stalemates on the spot
+            return _stalemate_sentence(pre_fen, line, b.side_to_move)
+        for san in (pv or [])[:8]:                            # …or the forced line walks into it
+            u = next((m for m in b.legal_moves() if b.san(m) == san), None)
+            if u is None:
+                return None
+            b = b.apply(u)
+            line.append(san)
+            if is_stalemate(b):
+                return _stalemate_sentence(pre_fen, line, b.side_to_move)
+        return None
+    except Exception:
+        return None
+
+
+def _stalemate_sentence(pre_fen: str | None, sans: list, color: str) -> str:
+    c = (color or "the opponent").capitalize()
+    return (f"This move only DRAWS by STALEMATE: after {_number_full_line(pre_fen, sans)}, {c} has NO "
+            f"legal move and is not in check — that is stalemate, a draw. Every one of {c}'s pieces is "
+            f"stuck, so once the material comes off there is nothing left to move. To WIN you must leave "
+            f"{c} a move to make — a spare tempo — instead of freezing the position.")
+
+
 def _win_band(wp: float) -> str:
     """A win% (player POV) → a plain assessment word. Coarse on purpose: the coach voices the BAND,
     never the number (reciting '19%' is not a coaching sentence, and the exact figure is noise)."""

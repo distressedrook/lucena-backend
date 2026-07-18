@@ -13,7 +13,7 @@ import contextvars
 
 from .bits import BitProgress
 from .grounding import (
-    _brief_move, _brief_reply, _deep_tactics, _solution_moves, _why_loses,
+    _brief_move, _brief_reply, _deep_tactics, _draws_by_stalemate, _solution_moves, _why_loses,
     tiered_bit_grounding, you_move_beat)
 from .handler_base import HandlerBase
 from .lesson import ACTIVE, LessonProgress, puzzle_lesson_id, puzzle_spec
@@ -285,7 +285,10 @@ class CoachHandler(HandlerBase):
         # stray mate-threat it chained into an invented "mate in 2". The swing already gives the eval.
         verdict = await asyncio.to_thread(self.ground.evaluate, inp.fen, [inp.uci])
         move_read = _brief_move(verdict, hide_best=True)
-        why = _why_loses(inp.fen, inp.uci, verdict.get("refutation_pv"))
+        # WHY the move fails — a stalemate DRAW (the win must keep the opponent a tempo) takes
+        # precedence over the material mechanism when it applies; both are deterministic, never guessed.
+        why = (_draws_by_stalemate(inp.fen, inp.uci, verdict.get("refutation_pv"))
+               or _why_loses(inp.fen, inp.uci, verdict.get("refutation_pv")))
         # The engine's OWN deep read of the position — the defensive resources (a killer check like
         # Rh1+) and structural linchpins (the c6-pawn/d5-bishop mutual defence) it already computes —
         # with the solution move stripped. This is how the coach can "see this far": explain why the

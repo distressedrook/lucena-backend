@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from lucena_backend.coaching.grounding import (
     TieredFacts, tiered_bit_grounding, _brief_move, _brief_reply, _pv_capture_victims, you_move_beat,
-    _swing_phrase, _why_loses, _deep_tactics, _solution_moves,
+    _swing_phrase, _why_loses, _deep_tactics, _solution_moves, _draws_by_stalemate,
 )
 
 # A move_line tree carrying a poisoned line, shaped exactly as preview_drill emits it.
@@ -250,6 +250,25 @@ def test_solution_moves_from_the_tree_root():
     assert _solution_moves({"root": {"kind": "mate", "options": [{"san": "Qh7#"}, {"san": "Qb8#"}]}}) \
         == ["Qh7#", "Qb8#"]
     assert _solution_moves(None) == []
+
+
+def test_draws_by_stalemate_is_grounded_not_inferred():
+    # k7/2K5/1P6/8/7p/1rR4p/7P/8 w — Rxh3 is the only win; Rc1 draws because Rc3+ Rxc3 leaves Black
+    # with no legal move (king boxed, h-pawns frozen): STALEMATE. Detected on the board, never guessed.
+    FEN = "k7/2K5/1P6/8/7p/1rR4p/7P/8 w - - 0 7"
+    out = _draws_by_stalemate(FEN, "c3c1", ["Rc3+", "Rxc3"])
+    assert out is not None
+    assert "DRAWS by STALEMATE" in out
+    assert "7. Rc1 7... Rc3+ 8. Rxc3" in out, "the exact line to the stalemate must be named"
+    assert "Black has NO legal move" in out and "spare tempo" in out
+    assert "Rxh3" not in out, "the solution move must never appear"
+
+
+def test_draws_by_stalemate_none_when_the_line_does_not_stalemate():
+    # A move that loses (Black keeps moves / mates) must not be reported as a stalemate draw.
+    FEN = "k7/2K5/1P6/8/7p/1rR4p/7P/8 w - - 0 7"
+    assert _draws_by_stalemate(FEN, "c7d7", ["Rc3", "Kd6"]) is None
+    assert _draws_by_stalemate(None, "c3c1", ["Rc3+"]) is None
 
 
 def test_brief_move_handles_error_and_empty():
