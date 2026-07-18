@@ -13,8 +13,8 @@ import contextvars
 
 from .bits import BitProgress
 from .grounding import (
-    _brief_move, _brief_reply, _deep_tactics, _draws_by_stalemate, _invented_moves, _numbered,
-    _solution_moves, _why_loses, tiered_bit_grounding, you_move_beat)
+    _brief_move, _brief_reply, _created_threat, _deep_tactics, _draws_by_stalemate, _invented_moves,
+    _numbered, _solution_moves, _why_loses, tiered_bit_grounding, you_move_beat)
 from .handler_base import HandlerBase
 from .lesson import ACTIVE, LessonProgress, puzzle_lesson_id, puzzle_spec
 from .loop import Handled, Open, Outcome, Suspend
@@ -347,53 +347,55 @@ class CoachHandler(HandlerBase):
         (free_text, no move) has nothing to evaluate, so it keeps the solve-time facts."""
         if not inp.uci or not inp.fen:
             return grounding.solve_text() if hasattr(grounding, "solve_text") else str(grounding)
+        verdict = await asyncio.to_thread(self.ground.evaluate, inp.fen, [inp.uci])
+        tree = (bit.spec.params or {}).get("tree") if (bit and getattr(bit, "spec", None)) else None
+        sols = _solution_moves(tree)
+        # Two deep reads, run CONCURRENTLY:
+        #  • PRE-move (inp.fen, the player's turn) → `_deep_tactics`: the position's linchpin / defensive
+        #    resource (why simple tries fail, the stalemate trap the win must dodge). Anchored on the
+        #    player's seat so its wording is consistent with the verdict.
+        #  • AFTER-move (the move on the board) → `_created_threat`: the decisive threat the move CREATES
+        #    ('White threatens mate: Ra4#'). This lives ONLY in the after-move position, so it was lost
+        #    when we stopped reading that board. Facts are colour-absolute now, so it can't flip
+        #    perspective — safe to surface, and instructive on both paths ('it threatens mate, but…' /
+        #    the reward). Solution-stripped so a right verdict never names the un-played next move.
+        after_fen = self._after_fen(inp.fen, inp.uci)
+
+        async def _an(fen):
+            return (await asyncio.to_thread(self.ground.analyze_and_show, fen,
+                                            focus="analysis", board_push=False)) if fen else None
+        pre, post = await asyncio.gather(_an(inp.fen), _an(after_fen))
+        deep = _deep_tactics((pre or {}).get("analysis") or [], sols)
+        created = _created_threat((post or {}).get("analysis") or [], sols)
         if correct:
-            verdict = await asyncio.to_thread(self.ground.evaluate, inp.fen, [inp.uci])
             # A best move has no "refutation" — `_brief_move`'s refutation line is the flaw explanation
             # for a WRONG move; on the right move it reads as if the move were dubious (and VerdictPrompt
             # deliberately does NOT continue the line on a right answer). Drop it.
             verdict = {k: v for k, v in verdict.items() if k != "refutation_pv"}
             move_read = _brief_move(verdict, hide_best=False)
             positional = "\n".join(str(x) for x in getattr(grounding, "always", []) or [])
-            # THE POINT of the move — the pre-move position's tactical linchpin / defensive resource
-            # (why the simple tries fail, the stalemate trap the win must dodge, a saving check it
-            # defeats). Same deep read the WRONG path gets, solution-stripped so it teaches the idea
-            # WITHOUT naming the un-played continuation — a correct verdict becomes a mini-lesson, not a
-            # bare "nice, that wins the piece". Grounded on inp.fen (pre-move, player to move).
-            tree = (bit.spec.params or {}).get("tree") if (bit and getattr(bit, "spec", None)) else None
-            pre = await asyncio.to_thread(self.ground.analyze_and_show, inp.fen,
-                                          focus="analysis", board_push=False)
-            deep = _deep_tactics((pre or {}).get("analysis") or [], _solution_moves(tree))
-            return "\n".join(p for p in (move_read, positional or None, deep) if p)
+            return "\n".join(p for p in (move_read, created, positional or None, deep) if p)
         # WRONG move — give it enough to explain the flaw properly, all PLAYER-anchored (the outcome
-        # alone read as "reduces your advantage" for a game-losing blunder):
-        #   1. `_brief_move` — the class, the eval SWING (winning→losing/equal), the refutation line.
-        #   2. `_why_loses` — the INSTRUCTIVE mechanism (you walked a defender off / moved into a
-        #      guarded square), derived deterministically from the board so it is grounded, not guessed.
-        #   3. `_deep_tactics` — the PRE-move position's resources/linchpins, solution stripped.
-        # NOT the AFTER-move analysis: that position is the OPPONENT's turn, so its "the opponent
-        # threatens …" phrasing is computed from the opponent's seat and inverts relative to the player
-        # — it narrated Black's threat as White's ("a threat for black, not white") and fed the model a
-        # stray mate-threat it chained into an invented "mate in 2". The swing already gives the eval.
-        verdict = await asyncio.to_thread(self.ground.evaluate, inp.fen, [inp.uci])
+        # alone read as "reduces your advantage" for a game-losing blunder): the class + eval SWING +
+        # refutation (`_brief_move`); the threat it created (`_created_threat` — credited before the
+        # refutation); the INSTRUCTIVE mechanism (`_why_loses` — a defender walked off, a guarded square)
+        # or a stalemate draw; the position's linchpin (`_deep_tactics`).
         move_read = _brief_move(verdict, hide_best=True)
         # WHY the move fails — a stalemate DRAW (the win must keep the opponent a tempo) takes
         # precedence over the material mechanism when it applies; both are deterministic, never guessed.
         why = (_draws_by_stalemate(inp.fen, inp.uci, verdict.get("refutation_pv"))
                or _why_loses(inp.fen, inp.uci, verdict.get("refutation_pv")))
-        # The engine's OWN deep read — defensive resources (a killer check like Rh1+), structural
-        # linchpins (the c6/d5 mutual defence) — solution stripped. Grounded on inp.fen (the PRE-move
-        # position), NOT `grounding.always`: the latter reads the session board_view, which the app's
-        # optimistic move can already have advanced to the AFTER-move position. That position is the
-        # OPPONENT's turn, so its facts are perspective-inverted — the null-move fact "the opponent
-        # threatens mate: Ra4#" is really WHITE (the player) threatening, and the player-anchored
-        # verdict then flips it onto Black. inp.fen is the player's turn, so its "the opponent" == the
-        # verdict's opponent — consistent.
-        tree = (bit.spec.params or {}).get("tree") if (bit and getattr(bit, "spec", None)) else None
-        pre = await asyncio.to_thread(self.ground.analyze_and_show, inp.fen,
-                                      focus="analysis", board_push=False)
-        deep = _deep_tactics((pre or {}).get("analysis") or [], _solution_moves(tree))
-        return "\n".join(p for p in (move_read, why, deep) if p)
+        return "\n".join(p for p in (move_read, created, why, deep) if p)
+
+    @staticmethod
+    def _after_fen(fen: str | None, uci: str | None) -> str | None:
+        """The FEN after `uci` is played on `fen` — the board the move CREATES, for reading the threat
+        it makes. Deterministic (a board apply, no engine). None if the move can't be applied."""
+        from lucena_engine.board import Board
+        try:
+            return Board(fen).apply(uci).fen
+        except Exception:
+            return None
 
     def _apply_board_effects(self, effects) -> None:
         """Move the board to reflect a move_line bit's advance — the player's move AND the walker's

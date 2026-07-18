@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from lucena_backend.coaching.grounding import (
     TieredFacts, tiered_bit_grounding, _brief_move, _brief_reply, _pv_capture_victims, you_move_beat,
-    _swing_phrase, _why_loses, _deep_tactics, _solution_moves, _draws_by_stalemate,
+    _swing_phrase, _why_loses, _deep_tactics, _created_threat, _solution_moves, _draws_by_stalemate,
 )
 
 # A move_line tree carrying a poisoned line, shaped exactly as preview_drill emits it.
@@ -252,10 +252,27 @@ def test_deep_tactics_none_without_a_tactics_line():
 def test_deep_tactics_keeps_mate_claims_when_correctly_grounded():
     # Mate claims are NOT dropped — they're genuinely useful; the fix for the mis-sided 'Ra4#' is to
     # ground on the PRE-move position (player's turn) so the perspective is right, not to censor mates.
-    always = ["Tactics: the opponent threatens mate in 13 — it starts with Rxc3+; "
+    always = ["Tactics: Black threatens mate in 13 — it starts with Rxc3+; "
               "Black threatens Rxc3+, winning White's rook on c3."]
     out = _deep_tactics(always, [])
     assert out is not None and "mate in 13" in out and "Rxc3+" in out
+
+
+def test_created_threat_surfaces_the_mate_the_move_makes():
+    # Read from the AFTER-move position (colour-attributed, so no perspective flip): the decisive
+    # threat the played move creates. Instructive on both verdicts — 'it threatens mate, but…' / the
+    # reward. Only loud mate threats qualify.
+    after = ["Tactics: White threatens mate: Ra4#; Black has doubled pawns on the h-file."]
+    out = _created_threat(after, [])
+    assert out == "The move just played creates this threat: White threatens mate: Ra4#."
+
+
+def test_created_threat_strips_a_solution_move_and_ignores_quiet_lines():
+    # A threat whose move is the un-played solution must NOT be surfaced (it would spoil the drill).
+    assert _created_threat(["Tactics: White threatens mate: Ra4#."], ["Ra4#"]) is None
+    # No mate threat → nothing to surface (a mundane recapture is not a teaching point).
+    assert _created_threat(["Tactics: the rook forks the king and the rook on h3."], []) is None
+    assert _created_threat([], []) is None
 
 
 def test_solution_moves_from_the_tree_root():

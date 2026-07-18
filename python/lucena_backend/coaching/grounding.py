@@ -288,6 +288,25 @@ def _deep_tactics(always_lines, solution_moves) -> str | None:
     return None
 
 
+def _created_threat(after_analysis, solution_moves) -> str | None:
+    """The decisive THREAT the move just played creates, read from the AFTER-move position and named by
+    absolute colour (so it can't flip perspective — the reason this was dropped before). 'White
+    threatens mate: Ra4#' is instructive on BOTH verdicts: on a wrong move the coach can credit the
+    threat before the refutation ('it even threatens mate, but…'); on a right move it's the reward.
+    Only the loud, decisive threats (a mate threat) are surfaced — a mundane recapture isn't a
+    teaching point. Any clause naming a solution/continuation move is stripped, so a right-move verdict
+    never pre-empts the un-played next drill move. None if the move creates no such threat."""
+    for line in (after_analysis or []):
+        s = str(line)
+        if not s.startswith("Tactics:"):
+            continue
+        body = s[len("Tactics:"):].strip().rstrip(".")
+        for clause in (c.strip() for c in body.split(";")):
+            if "threatens mate" in clause and not any(m and m in clause for m in solution_moves):
+                return f"The move just played creates this threat: {clause}."
+    return None
+
+
 def _number_full_line(pre_fen: str | None, sans: list) -> str:
     """Number a line whose FIRST move is the PLAYER's (unlike `_numbered_line`, which starts with the
     opponent's refutation) — '7. Rc1 7... Rc3+ 8. Rxc3'. Off the pre-move FEN's number + side."""
