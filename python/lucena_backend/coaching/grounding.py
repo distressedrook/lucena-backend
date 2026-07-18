@@ -116,6 +116,38 @@ def _move_phrase(san: str) -> str:
     return f"a {piece} {verb} {dest}{tail}"
 
 
+def _pv_capture_victims(fen: str | None, played_san: str | None, pv: list) -> list:
+    """For each capturing move in the refutation `pv`, the piece it TAKES, as a word — walked on a
+    board so the coach never guesses the victim. A bare SAN ("Rxe1") names the mover and the square
+    but not what stands on it; handed only that, the model invented the captured piece (a live verdict
+    called the rook on e1 a 'knight'). Aligned to `pv`; None where a move is not a capture or can't be
+    resolved (bad FEN, en-passant, an out-of-line SAN)."""
+    if not fen or not played_san:
+        return [None] * len(pv)
+    try:
+        from lucena_engine.board import Board
+        b = Board(fen)
+        played = next((m for m in b.legal_moves() if b.san(m) == played_san), None)
+        if played is None:
+            return [None] * len(pv)
+        b = b.apply(played)                       # step into the position the refutation hangs off
+        victims: list = []
+        for san in pv:
+            uci = next((m for m in b.legal_moves() if b.san(m) == san), None)
+            if uci is None:
+                break                             # line diverged; leave the rest unresolved
+            victim = None
+            if "x" in san:
+                dest = uci[2:4]
+                victim = next((_PIECE_WORD.get(p.piece.upper(), "pawn") for p in b.piece_list()
+                               if p.square == dest), None)   # a piece we found but can't name is a pawn
+            victims.append(victim)
+            b = b.apply(uci)
+        return victims + [None] * (len(pv) - len(victims))
+    except Exception:
+        return [None] * len(pv)
+
+
 def _numbered(san: str | None, fen: str | None) -> str:
     """SAN prefixed with its move number, computed from the FEN the move is played FROM —
     "12. Nf3" for White, "12... Nf3" for Black. The same fullmove-number arithmetic as
@@ -188,13 +220,23 @@ def _brief_move(v: dict, *, hide_best: bool = False) -> str:
         # Numbered here rather than handed over bare: see `_numbered_line` — reciting an unlabeled
         # PV is move-number arithmetic, and that arithmetic is exactly what was going wrong.
         numbered = _numbered_line(pv[:6], v.get("fen"), played_by_white=v.get("side_to_move") == "white")
+        # Name what each capture TAKES — resolved on a board, not left for the model to guess (it
+        # invented the piece on the captured square: called a rook a 'knight').
+        victims = _pv_capture_victims(v.get("fen"), v.get("san"), pv[:6])
         # The refutation is the OPPONENT's line: it opens with their punishing move, then alternates
         # (opponent, you, opponent, …). Label every move's side explicitly — the bare mixed line let
         # the model flip who's who (a live wrong-verdict read the opponent's move as the player's).
-        labeled = " ".join(f"({'opponent' if i % 2 == 0 else 'you'}) {m}" for i, m in enumerate(numbered))
+        labeled = " ".join(
+            f"({'opponent' if i % 2 == 0 else 'you'}) {m}"
+            + (f" [takes the {victims[i]}]" if i < len(victims) and victims[i] else "")
+            for i, m in enumerate(numbered))
+        dest = first.rstrip("+#")[-2:]
+        phrase = f"a {piece} captures the {victims[0]} on {dest}" if victims and victims[0] \
+            else _move_phrase(first)
         out.append(f"The opponent refutes it with {numbered[0] if numbered else first} "
-                   f"({_move_phrase(first)}); the line then runs {labeled}. Explain the flaw ONLY through "
-                   f"this line — the refuting move is the opponent's {first}, a {piece} move, nothing else.")
+                   f"({phrase}); the line then runs {labeled}. Explain the flaw ONLY through this line — "
+                   f"the refuting move is the opponent's {first}, a {piece} move, nothing else. Name a "
+                   f"captured piece ONLY as written here — never guess what stands on a square.")
     return "\n".join(out)
 
 

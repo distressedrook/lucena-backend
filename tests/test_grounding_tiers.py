@@ -10,7 +10,7 @@ solve-time text and ARE in the reveal-time text.
 from __future__ import annotations
 
 from lucena_backend.coaching.grounding import (
-    TieredFacts, tiered_bit_grounding, _brief_move,
+    TieredFacts, tiered_bit_grounding, _brief_move, _pv_capture_victims,
 )
 
 # A move_line tree carrying a poisoned line, shaped exactly as preview_drill emits it.
@@ -129,6 +129,31 @@ def test_brief_move_never_capitalises_a_move_token():
     # 'bxc4' (pawn) must not become 'Bxc4' (bishop) — the first-letter slip we fixed in the trap voice.
     s = _brief_move(RIGHT_EVAL, hide_best=False)
     assert "Bxc4" not in s
+
+
+def test_pv_capture_victims_names_the_real_piece_taken():
+    # White plays the wrong Kg2; Black refutes with Rxe1, taking the ROOK on e1 (not a knight — the
+    # live hallucination). The victim is resolved on a board, so it is exactly what stands there.
+    fen = "8/1k2N3/1p6/3p1p2/6p1/P5P1/1P3P2/4RK1r w - - 1 4"
+    victims = _pv_capture_victims(fen, "Kg2", ["Rxe1", "Nxf5", "Kc7"])
+    assert victims[0] == "rook", "Rxe1 takes the rook on e1, never a knight"
+    assert victims[1] == "pawn", "Nxf5 takes the pawn on f5"
+    assert victims[2] is None, "Kc7 is not a capture"
+
+
+def test_pv_capture_victims_degrades_on_bad_input():
+    assert _pv_capture_victims(None, "Kg2", ["Rxe1"]) == [None]
+    assert _pv_capture_victims("8/8/8/8/8/8/8/8 w - - 0 1", "Kg2", ["Rxe1", "Qd1"]) == [None, None]
+
+
+def test_brief_move_wrong_names_the_captured_piece_not_a_guess():
+    # End-to-end: the wrong-move briefing states what the refuting capture actually takes.
+    v = {"san": "Kg2", "class": "blunder", "side_to_move": "white",
+         "fen": "8/1k2N3/1p6/3p1p2/6p1/P5P1/1P3P2/4RK1r w - - 1 4",
+         "refutation_pv": ["Rxe1", "Nxf5", "Kc7"], "facts": []}
+    s = _brief_move(v, hide_best=True)
+    assert "captures the rook on e1" in s, "the victim must be named, not left for the model to guess"
+    assert "[takes the rook]" in s
 
 
 def test_brief_move_handles_error_and_empty():
