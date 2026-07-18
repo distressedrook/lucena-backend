@@ -217,6 +217,20 @@ def _swing_phrase(after_wp, best_wp) -> str | None:
     return f"this move turns a {b} position into a {a} one for you"
 
 
+_PIECE_VAL = {"K": 6, "Q": 5, "R": 4, "B": 3, "N": 2, "P": 1}
+
+
+def _fork_names(targets) -> str:
+    """Name the pieces a fork hits, most valuable first — 'the king and the queen on e7'. The king is
+    the check, so it leads; it needs no square, the others carry theirs."""
+    ordered = sorted(targets, key=lambda p: _PIECE_VAL.get(p.piece.upper(), 0), reverse=True)
+    parts = []
+    for p in ordered[:2]:                         # two is enough to read as a fork
+        w = _PIECE_WORD.get(p.piece.upper(), "pawn")
+        parts.append("the king" if p.piece.upper() == "K" else f"the {w} on {p.square}")
+    return " and ".join(parts)
+
+
 def _why_loses(pre_fen: str | None, uci: str | None, pv: list) -> str | None:
     """Derive the INSTRUCTIVE reason a move drops material — the coaching point, not just the outcome.
     The refutation says WHAT the opponent wins ('Rxe1 wins the rook'); this says WHY it is possible.
@@ -249,18 +263,28 @@ def _why_loses(pre_fen: str | None, uci: str | None, pv: list) -> str | None:
         if sq == dest:
             took = next((p for p in b.piece_list() if p.square == dest), None)   # what the move grabbed
             gain = f" and takes the {_PIECE_WORD.get(took.piece.upper(), 'pawn')}" if took else ""
+            # The move's INTENT: does the piece it just moved hit TWO enemy pieces at once? That fork is
+            # WHY the move tempts — the idea is sound, it fails only because the landing square is guarded.
+            targets = [p for p in after.piece_list()
+                       if p.color == opp and dest in after.attackers(p.square, moved.color)]
+            intent = ""
+            if len(targets) >= 2:
+                intent = f"Your {mword} on {dest} would fork {_fork_names(targets)} — the right idea. But "
             # Name the guard that recaptures — the one whose piece matches the refuting move.
             want = refute[0] if refute[:1].isupper() else "P"
             guard = next((g for g in after.attackers(dest, opp)
                           if next((p.piece.upper() for p in after.piece_list() if p.square == g), "") == want),
                          None)
-            gtxt = ""
             if guard:
                 gp = next((p for p in after.piece_list() if p.square == guard), None)
                 gword = _PIECE_WORD.get((gp.piece if gp else "").upper(), "pawn") if gp else "piece"
-                gtxt = f" the {gword} on {guard} still guards {dest}, so"
-            return (f"Your {mword} moves to {dest}{gain}, but{gtxt} {refute} recaptures it — you give "
-                    f"up the {mword}, coming out behind on the exchange.")
+                lead = intent or f"Your {mword} moves to {dest}{gain}, but "
+                tail = (f"recaptures before the fork wins anything — that {gword} is what you must deal "
+                        f"with first." if intent else
+                        f"recaptures it, so you just give up the {mword} and come out behind.")
+                return f"{lead}the {gword} on {guard} still guards {dest}, so {refute} {tail}"
+            return (f"{intent or f'Your {mword} moves to {dest}{gain}, but '}{refute} recaptures it — "
+                    f"you give up the {mword}, coming out behind on the exchange.")
 
         # CASE B — a stationary piece of yours is left short of defenders.
         victim = next((p for p in b.piece_list() if p.square == sq), None)

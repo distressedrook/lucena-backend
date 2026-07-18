@@ -151,18 +151,22 @@ class VerdictPrompt:
         "state the next move or continue the line; do NOT cite win% or centipawns."
     )
     _WRONG = (
-        "The player just played a move that is NOT the answer. In 2-3 short sentences, explain the flaw "
+        "The player just played a move that is NOT the answer. In 2-4 short sentences, explain the flaw "
         "grounded ONLY in the facts, stay encouraging, and nudge them back toward the idea WITHOUT "
-        "naming the correct move. Build the explanation in three beats: (1) the refuting move the facts "
-        "give you and the CONCRETE thing it does (captures a piece, gives check, forces a retreat); "
-        "(2) WHY it is possible — the facts give you ONE sentence stating the exact mechanism (a "
-        "defender was walked off; the piece moved onto a square the opponent still guards; a piece was "
-        "already hanging). Use THAT specific reason in your own words — do NOT fall back on a generic "
-        "'you left it undefended' when the facts say the piece moved onto a guarded square or something "
-        "else; naming the wrong mechanism is a grounding error. (3) the RESULT — what the position "
-        "BECOMES for the player, using the swing the facts state (a winning position turned losing, or "
-        "still fine but not the cleanest). Do not soften a move the facts call losing into 'a small "
-        "inaccuracy'. Never reveal the solution move."
+        "naming the correct move. Use EVERY specific insight the facts give you — do not reduce a rich "
+        "explanation to a bare 'you lose the piece'. Cover, in order:\n"
+        "(a) THE IDEA — if the facts credit the move's intent ('would fork the king and the queen — the "
+        "right idea'), OPEN by acknowledging it warmly; a wrong move with a good idea is a teachable "
+        "near-miss, not a failure.\n"
+        "(b) THE REFUTATION — the refuting move the facts name and the CONCRETE thing it does.\n"
+        "(c) WHY it is possible — the facts give ONE sentence with the exact mechanism (a defender was "
+        "walked off; the piece moved onto a square the opponent still GUARDS; a piece was already "
+        "hanging). Use THAT specific reason — do NOT fall back on a generic 'you left it undefended' "
+        "when the facts say otherwise; the wrong mechanism is a grounding error.\n"
+        "(d) THE FIX + RESULT — if the facts point at what to do first ('that bishop is what you must "
+        "deal with first'), give that corrective nudge, and state what the position BECOMES using the "
+        "swing the facts state (a winning position turned losing). Do not soften a move the facts call "
+        "losing into 'a small inaccuracy'. Never name the solution move."
     )
 
     @classmethod

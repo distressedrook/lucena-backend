@@ -209,12 +209,15 @@ def test_why_loses_names_the_abandoned_defender():
     assert "rook on e1" in why and "Rxe1" in why
 
 
-def test_why_loses_names_a_move_into_a_guarded_square():
-    # Nxc6+ played FIRST (premature): the knight lands on c6, but the d5 bishop still guards it, so
-    # Bxc6 recaptures. The mechanism is "moved onto a guarded square", NOT "left undefended".
+def test_why_loses_names_a_move_into_a_guarded_square_with_the_fork_intent():
+    # Nxc6+ played FIRST (premature): the knight would fork the king and queen (the RIGHT idea), but
+    # the d5 bishop still guards c6, so Bxc6 recaptures. The deep read must credit the idea, name the
+    # guard as the mechanism (NOT "undefended"), and point at the guard as the thing to deal with first.
     why = _why_loses("1k5r/4q3/1pp5/3bNp2/6p1/P5P1/1P3P2/3QRK2 w - - 0 1", "e5c6", ["Bxc6"])
     assert why is not None
-    assert "moves to c6" in why and "bishop on d5 still guards c6" in why
+    assert "fork the king and the queen on e7" in why and "the right idea" in why
+    assert "bishop on d5 still guards c6" in why
+    assert "deal with first" in why
     assert "undefended" not in why, "a move-into-a-capture is not an 'undefended' story"
 
 
