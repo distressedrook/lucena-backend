@@ -13,8 +13,8 @@ import contextvars
 
 from .bits import BitProgress
 from .grounding import (
-    _brief_move, _brief_reply, _deep_tactics, _draws_by_stalemate, _numbered, _solution_moves,
-    _why_loses, tiered_bit_grounding, you_move_beat)
+    _brief_move, _brief_reply, _deep_tactics, _draws_by_stalemate, _invented_moves, _numbered,
+    _solution_moves, _why_loses, tiered_bit_grounding, you_move_beat)
 from .handler_base import HandlerBase
 from .lesson import ACTIVE, LessonProgress, puzzle_lesson_id, puzzle_spec
 from .loop import Handled, Open, Outcome, Suspend
@@ -301,9 +301,28 @@ class CoachHandler(HandlerBase):
         # board now shows the opponent to move, so "you play the side to move" flips White/Black.
         facts = await self._move_facts(inp, correct, grounding, bit)
         attempt = inp.san or inp.uci or (inp.text or "")
-        out = await self._gen_json(VerdictPrompt.system(correct=correct, player_color=player_color),
-                                   VerdictPrompt.prompt(attempt=attempt, facts=facts))
-        return out.get("text") or ("Right — nicely done." if correct else "Not quite — look again.")
+        sys = VerdictPrompt.system(correct=correct, player_color=player_color)
+        usr = VerdictPrompt.prompt(attempt=attempt, facts=facts)
+        # DETERMINISTIC GUARD (prompt rules alone didn't hold): reject any verdict that NAMES a move
+        # not in the facts / not the move played — flash-lite kept inventing one (a promotion as "Kb2",
+        # a rook dance as "Ra4# mate"). Regenerate once; if it invents again, fall back to a move-free
+        # sentence so a hallucinated move never reaches the player.
+        for _ in range(2):
+            out = await self._gen_json(sys, usr)
+            text = out.get("text") or ""
+            if text and not _invented_moves(text, facts, inp.san):
+                return text
+        return self._safe_verdict(correct, facts)
+
+    def _safe_verdict(self, correct: bool, facts: str) -> str:
+        """A move-free fallback when the model can't stop inventing a move — grounded in the eval swing
+        only (no move token, so nothing to hallucinate)."""
+        if correct:
+            return "Right — that's the idea. Well played."
+        swing = "This move throws the advantage away." if "losing" in (facts or "") \
+            else "This move lets your advantage slip." if "equal" in (facts or "") \
+            else "That's not the one."
+        return f"Not quite — {swing[0].lower()}{swing[1:]} Look again."
 
     async def _reply_text(self, reply: dict, player_color: str | None) -> str:
         """Voice the opponent's auto-played reply (the second beat). Grounded on `_brief_reply` — the

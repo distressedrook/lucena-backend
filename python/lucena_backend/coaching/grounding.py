@@ -8,6 +8,7 @@ No Orchestrator, no LLM, no engine calls: pure functions over dicts and FEN/SAN 
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 # Shared across every prompt that hands the model a move to name. The number is COMPUTED (see
@@ -204,6 +205,31 @@ def _numbered_line(pv: list, fen: str | None, *, played_by_white: bool) -> list:
             num += 1
         white_to_move = not white_to_move
     return out
+
+
+# A SAN-ish move token: castling, a piece move (optionally with disambiguation/capture), a pawn
+# capture, or a promotion. Deliberately NOT bare pawn pushes like "e4" — those collide with square
+# names ("the rook on c3") and would false-positive; the hallucinations we must catch (Ra4#, Kc8,
+# invented lines) all carry a piece letter, a capture, or a promotion.
+_SAN_TOKEN = re.compile(
+    r"\b(?:O-O-O|O-O|[KQRBN][a-h]?[1-8]?x?[a-h][1-8](?:=[QRBN])?[+#]?"
+    r"|[a-h]x[a-h][1-8](?:=[QRBN])?[+#]?|[a-h][18]=[QRBN][+#]?)\b")
+
+
+def _move_tokens(text: str | None) -> set[str]:
+    """The SAN move tokens in a string, normalised (check/mate suffix stripped) for comparison."""
+    return {m.rstrip("+#") for m in _SAN_TOKEN.findall(text or "")}
+
+
+def _invented_moves(output: str | None, facts: str | None, played: str | None) -> set[str]:
+    """Moves the model NAMED that are NOT grounded — not the move played, not in the facts. The
+    deterministic guard the prompt rules couldn't enforce: flash-lite kept inventing a move (a queen
+    promotion as 'Kb2'; a rook dance as 'Ra4# mate') on perfectly clean grounding. A non-empty result
+    means the verdict is hallucinated and must be regenerated or dropped."""
+    allowed = _move_tokens(facts)
+    if played:
+        allowed.add(played.rstrip("+#"))
+    return _move_tokens(output) - allowed
 
 
 def _solution_moves(tree: dict | None) -> list[str]:

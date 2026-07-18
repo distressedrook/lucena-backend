@@ -274,3 +274,17 @@ def test_draws_by_stalemate_none_when_the_line_does_not_stalemate():
 def test_brief_move_handles_error_and_empty():
     assert _brief_move({"error": "x"}) == "(no move read available)"
     assert _brief_move({}).startswith("Move played:")
+
+
+def test_invented_moves_flags_ungrounded_move_tokens():
+    from lucena_backend.coaching.grounding import _invented_moves
+    facts = ("Move played: Rc4. The opponent refutes it with 7... Rb4 8. Rc5 8... Rb5 9. Rc6 9... Rb4. "
+             "Black threatens Rxc3+ winning the rook.")
+    # Ra4#, Kc8, Rb3 are NOT in the facts → invented; Rxc3+ IS grounded → clean.
+    assert _invented_moves("Rc4 allows Rb4, a threat of Ra4#; then 8. Rc6 Rb3 9. Kc8.", facts, "Rc4") \
+        == {"Ra4", "Kc8", "Rb3"}
+    assert _invented_moves("Rc4 lets Rb4 threaten Rxc3+, winning your rook.", facts, "Rc4") == set()
+    # a queen promotion narrated as a king move
+    assert _invented_moves("Your move Kb2 sets up mate.", "Move played: b8=Q+.", "b8=Q+") == {"Kb2"}
+    # bare pawn pushes / square mentions must NOT false-positive
+    assert _invented_moves("the rook on c3 is loose", facts, "Rc4") == set()
