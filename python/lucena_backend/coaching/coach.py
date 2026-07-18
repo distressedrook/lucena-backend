@@ -42,7 +42,8 @@ class CoachHandler(HandlerBase):
         bit = lesson.current_bit()
         # Working status is owned by the loop (turn boundary), not here — see FreeformHandler.handle.
         if inp.kind == "present":                 # synthetic entry action (from loop re-route)
-            await self._present_bit(bit)
+            self._reset_drill(lesson, bit)        # a presented drill starts from the top
+            await self._present_bit(lesson.current_bit())
             return Handled()
         if inp.kind == "move":
             return await self._adjudicate(lesson, bit, inp)
@@ -151,13 +152,30 @@ class CoachHandler(HandlerBase):
                            bits=[BitProgress() for _ in spec.bits]))
         return True
 
+    def _reset_drill(self, lesson, bit) -> None:
+        """Presenting a drill starts it from the ROOT: clear any stale walker state so the student's
+        first move is judged as the first move. A prior UNFINISHED attempt leaves `strategy_state`
+        mid-line (the walker past move 1); re-presented, the board shows the root but the walker is
+        deeper, so a correct first move gets adjudicated against the wrong node and read as a blunder.
+        Board and walker must agree at the top. (Resuming mid-line belongs to the suspend flow, not a
+        fresh presentation.)"""
+        if bit.spec.strategy == "move_line" and bit.progress.strategy_state:
+            lesson.set_bit_progress(bit.index, BitProgress())
+            self.store.save_lesson_progress(lesson.progress)
+
     async def _present_bit(self, bit) -> None:
         """Deliver the bit's challenge (authored text, else a placeholder pending co-design), then the
         §5-moment-1 WARN (from §4's warn_only tier). If a trap is present, ALSO publish it to the app —
         set the store's poisoned slot + repaint — so the board carries `has_poisoned_line` and the app
         shows its "show poisoned line" button (and latches the line for reveal)."""
-        self._say(bit.spec.challenge or "Find the best continuation here.", tone="teach", stops=True)
         tree = (bit.spec.params or {}).get("tree") or {}
+        # Board to the line's ROOT — what the student sees must be the position their first move is
+        # judged against (the walker was just reset to the root in `_reset_drill`; they must agree).
+        root_fen = tree.get("fen") or (tree.get("root") or {}).get("fen")
+        if root_fen:
+            self.store.write_history([{"n": 0, "san": None, "uci": None, "fen": root_fen}])
+            self.store.write_board(root_fen)
+        self._say(bit.spec.challenge or "Find the best continuation here.", tone="teach", stops=True)
         if tree.get("has_poisoned_line"):
             warn = tiered_bit_grounding(None, tree).warn_text()
             if warn:
