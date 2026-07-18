@@ -338,13 +338,13 @@ def _legal_sans(fen: str | None) -> set[str] | None:
 
 
 def _deep_tactics(always_lines, solution_moves, live_fen=None) -> str | None:
-    """The engine's OWN deep read of the position — the defensive resources and structural linchpins
-    it already computes (the null-move 'ignore Rh1+ and you go from winning to losing', the defender
-    'the pawn on c6 is the only defender of the bishop on d5') — MINUS the one clause that names the
-    solution. The `combination` detector announces 'a forcing sequence starting with <answer>', which
-    would spoil the puzzle, so any clause naming a solution move is dropped. This is how the coach
-    explains WHY the position is subtle (the Rh1+ resource, the mutual-defence knot) without handing
-    over the move. None if there is no tactical line or nothing survives the strip.
+    """The POINT of a CORRECT move — the engine's OWN deep read (defensive resources, structural
+    linchpins, the defender 'the pawn on c6 is the only defender of the bishop on d5') MINUS the one
+    clause that names the solution. Now used ONLY on the right-verdict path (the wrong path was retired
+    to stop the model force-fitting an irrelevant motif), so the framing is 'why THIS move is the
+    move', never 'why a move fails'. The `combination` detector announces 'a forcing sequence starting
+    with <answer>', which would spoil the puzzle, so any clause naming a solution move is dropped. None
+    if there is no tactical line or nothing survives the strip.
 
     `live_fen` (optional): the position AFTER the move just played. When given, a clause whose named
     move(s) are ALL illegal there is dropped as STALE — this read is grounded on the PRE-move board,
@@ -366,9 +366,10 @@ def _deep_tactics(always_lines, solution_moves, live_fen=None) -> str | None:
                     continue
             kept.append(c)
         if kept:
-            return ("Key tactical features of the position (BACKGROUND — defenders, pins, linchpins). "
-                    "Use one ONLY if it genuinely explains why the move fails; if the refutation line "
-                    "already shows the failure, IGNORE these rather than force a connection: "
+            return ("Key tactical features that make this the move — the resource it exploits, a "
+                    "defender it removes, or a linchpin it turns on (e.g. 'the knight on c3 is the only "
+                    "defender of the bishop on a2' — the POINT is removing that defender, not the "
+                    "capture itself). Surface the ONE that is the real point of the move: "
                     + "; ".join(kept) + ".")
     return None
 
