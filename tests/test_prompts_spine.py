@@ -99,6 +99,14 @@ def test_verdict_wrong_explains_the_flaw_without_the_solution():
     assert "NOT the answer" in s and "WITHOUT naming the correct move" in s
 
 
+def test_verdict_wrong_forbids_inventing_intent_or_direction():
+    # A king move to g2 was narrated as "moving toward the center" — a fabricated purpose the facts
+    # never stated. The idea-beat must be conditional, and the no-invention rule must forbid direction.
+    s = VerdictPrompt.system(correct=False)
+    assert "SKIP this beat entirely" in s, "the 'credit the idea' beat must be conditional"
+    assert "toward the centre" in s, "must forbid inventing a move's direction/purpose"
+
+
 # -- freeform classifier surface -------------------------------------------------------------------
 
 def test_freeform_prompt_declares_its_four_intents():

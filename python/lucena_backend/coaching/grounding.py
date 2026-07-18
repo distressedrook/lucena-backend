@@ -43,8 +43,11 @@ _NO_INVENTION_RULE = (
     "structure, or evaluation. Do NOT name a tactical motif (pin, fork, skewer, discovered attack, "
     "zugzwang, …) or characterize a move (sacrifice, combination, brilliancy) unless the facts use "
     "that word — naming one they do not license is the most common way to be confidently wrong (a "
-    "knight capturing a pawn wins material; it is not a sacrifice). When the facts don't say WHY, "
-    "state the concrete consequence they DO give and stop — never supply a reason of your own.\n"
+    "knight capturing a pawn wins material; it is not a sacrifice). Do NOT attribute a PURPOSE or "
+    "DIRECTION to a move the facts don't state — not 'heading for the centre', 'bringing the king to "
+    "safety', 'an ambitious try', 'developing a piece'. A move to g2 is a move to g2, not a move "
+    "'toward the centre'. When the facts don't say WHY, state the concrete consequence they DO give "
+    "and stop — never supply a reason, plan, or flavour of your own.\n"
 )
 
 
