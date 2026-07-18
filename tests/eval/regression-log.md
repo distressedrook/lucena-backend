@@ -78,4 +78,21 @@ status (OPEN / FIXED / WONTFIX).
 - **Direction (chosen):** don't point-patch the fork claim — fold it into "surface only what matters,
   in a proper format" (relevance-filtered, structured grounding). A claim about the *idea*/*fix* is
   only earned if the SOLUTION line supports it.
-- **Status:** OPEN — subsumed by the relevance-filter task.
+- **Status:** FIXED by the reason-deriver (commit below).
+
+---
+
+## Reason-deriver landed (relevance-filtered, single-solution-gated grounding)
+
+Resolves P1/P2/P3 at the root instead of point-patching:
+- WRONG verdicts no longer dump every motif — `_deep_tactics` retired from that path. (kills P2's
+  fabricated "the pawn on g3…" cause.)
+- `_why_loses` validates its interpretive claims against the SOLUTION line, but ONLY when the position
+  has a SINGLE best move (`_node_at`/`_node_solutions`); with several best moves or a non-puzzle flow
+  it stays permissive. The mechanism (why material drops) is ALWAYS derived. (kills P3's false fork
+  "right idea".)
+- Two local-agent review rounds; findings fixed: multi-ply anchoring, a self-contradiction, a
+  non-fork move being mis-sold as a fork, and sibling-branch anchoring (`_node_at` now searches the
+  whole tree). Design: `docs/reason-deriver-design.md`.
+- Deferred (not regressions, logged): `_node_at` transposition ambiguity; the `same_fork` /
+  guard-deflection branches lack dedicated tests (guarded by try/except + live testing).

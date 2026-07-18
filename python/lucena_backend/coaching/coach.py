@@ -14,7 +14,8 @@ import contextvars
 from .bits import BitProgress
 from .grounding import (
     _brief_move, _brief_reply, _created_threat, _deep_tactics, _draws_by_stalemate, _invented_moves,
-    _numbered, _solution_moves, _why_loses, tiered_bit_grounding, you_move_beat)
+    _node_at, _node_solutions, _numbered, _solution_moves, _why_loses, tiered_bit_grounding,
+    you_move_beat)
 from .handler_base import HandlerBase
 from .lesson import ACTIVE, LessonProgress, puzzle_lesson_id, puzzle_spec
 from .loop import Handled, Open, Outcome, Suspend
@@ -350,50 +351,42 @@ class CoachHandler(HandlerBase):
         verdict = await asyncio.to_thread(self.ground.evaluate, inp.fen, [inp.uci])
         tree = (bit.spec.params or {}).get("tree") if (bit and getattr(bit, "spec", None)) else None
         sols = _solution_moves(tree)
-        # Two deep reads, run CONCURRENTLY:
-        #  • PRE-move (inp.fen, the player's turn) → `_deep_tactics`: the position's linchpin / defensive
-        #    resource (why simple tries fail, the stalemate trap the win must dodge). Anchored on the
-        #    player's seat so its wording is consistent with the verdict.
-        #  • AFTER-move (the move on the board) → `_created_threat`: the decisive threat the move CREATES
-        #    ('White threatens mate: Ra4#'). This lives ONLY in the after-move position, so it was lost
-        #    when we stopped reading that board. Facts are colour-absolute now, so it can't flip
-        #    perspective — safe to surface, and instructive on both paths ('it threatens mate, but…' /
-        #    the reward). Solution-stripped so a right verdict never names the un-played next move.
         after_fen = self._after_fen(inp.fen, inp.uci)
 
         async def _an(fen):
             return (await asyncio.to_thread(self.ground.analyze_and_show, fen,
                                             focus="analysis", board_push=False)) if fen else None
-        pre, post = await asyncio.gather(_an(inp.fen), _an(after_fen))
-        pre_analysis = (pre or {}).get("analysis") or []
-        created = _created_threat((post or {}).get("analysis") or [], sols)
         if correct:
-            # A best move has no "refutation" — `_brief_move`'s refutation line is the flaw explanation
-            # for a WRONG move; on the right move it reads as if the move were dubious (and VerdictPrompt
-            # deliberately does NOT continue the line on a right answer). Drop it.
-            verdict = {k: v for k, v in verdict.items() if k != "refutation_pv"}
+            # RIGHT — the POINT of the move, run CONCURRENTLY: the PRE-move linchpin / defensive resource
+            # (`_deep_tactics` — why simple tries fail, the trap the win dodges) plus the decisive threat
+            # the move CREATES (`_created_threat`, from the after-move read). Solution-stripped so neither
+            # names the un-played next move.
+            pre, post = await asyncio.gather(_an(inp.fen), _an(after_fen))
+            verdict = {k: v for k, v in verdict.items() if k != "refutation_pv"}   # a best move has none
             move_read = _brief_move(verdict, hide_best=False)
             positional = "\n".join(str(x) for x in getattr(grounding, "always", []) or [])
-            # Pre-move deep read, NOT stale-filtered: on the RIGHT move a pre-move threat the move
-            # neutralises is exactly the point ('this addresses the Rxc3+ that would have won the rook').
-            deep = _deep_tactics(pre_analysis, sols)
+            created = _created_threat((post or {}).get("analysis") or [], sols)
+            deep = _deep_tactics((pre or {}).get("analysis") or [], sols)
             return "\n".join(p for p in (move_read, created, positional or None, deep) if p)
-        # WRONG move — give it enough to explain the flaw properly, all PLAYER-anchored (the outcome
-        # alone read as "reduces your advantage" for a game-losing blunder): the class + eval SWING +
-        # refutation (`_brief_move`); the threat it created (`_created_threat` — credited before the
-        # refutation); the INSTRUCTIVE mechanism (`_why_loses` — a defender walked off, a guarded square)
-        # or a stalemate draw; the position's linchpin (`_deep_tactics`).
+        # WRONG — ONLY what explains THIS failure, relevance-filtered (no motif dump):
+        #   • `_brief_move` — class + eval SWING + the refutation line (the concrete why).
+        #   • `_created_threat` — the decisive threat the move made, if any (from the after-move read).
+        #   • `_why_loses` — the ONE instructive mechanism (a defender walked off, a guarded square) or a
+        #     stalemate draw, with its 'right idea' / 'deal with X first' claims VALIDATED against the
+        #     SOLUTION line: a real-but-irrelevant fork is not credited (P3). NO `_deep_tactics` here —
+        #     dumping every structural motif ('g3 defends f2', 'f6 pinned') let the model force-fit an
+        #     irrelevant one into a false cause; the refutation + mechanism already carry the why.
+        post = await _an(after_fen)
         move_read = _brief_move(verdict, hide_best=True)
-        # WHY the move fails — a stalemate DRAW (the win must keep the opponent a tempo) takes
-        # precedence over the material mechanism when it applies; both are deterministic, never guessed.
+        created = _created_threat((post or {}).get("analysis") or [], sols)
+        # The interpretive fork/'idea' credit is validated only when THIS position has a single best
+        # move; the mechanism itself is derived regardless. Anchor on inp.fen (a wrong move can be deep
+        # in a multi-ply drill), and count the solutions AT that node.
+        sol_moves = _node_solutions(_node_at(tree, inp.fen))
         why = (_draws_by_stalemate(inp.fen, inp.uci, verdict.get("refutation_pv"))
-               or _why_loses(inp.fen, inp.uci, verdict.get("refutation_pv")))
-        # Pre-move deep read, STALE-FILTERED against the after-move board: a wrong move can neutralise a
-        # pre-move threat (moving the attacked piece) while failing for another reason — without the
-        # filter the 'what to deal with' beat cited a threat the move made impossible ('deal with Rxc3+'
-        # after Rc4 left c3 empty, contradicting the refutation).
-        deep = _deep_tactics(pre_analysis, sols, live_fen=after_fen)
-        return "\n".join(p for p in (move_read, created, why, deep) if p)
+               or _why_loses(inp.fen, inp.uci, verdict.get("refutation_pv"),
+                             solution_ucis=sol_moves, single_solution=(len(sol_moves) == 1)))
+        return "\n".join(p for p in (move_read, created, why) if p)
 
     @staticmethod
     def _after_fen(fen: str | None, uci: str | None) -> str | None:

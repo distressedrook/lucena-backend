@@ -11,7 +11,8 @@ from __future__ import annotations
 
 from lucena_backend.coaching.grounding import (
     TieredFacts, tiered_bit_grounding, _brief_move, _brief_reply, _pv_capture_victims, you_move_beat,
-    _swing_phrase, _why_loses, _deep_tactics, _created_threat, _solution_moves, _draws_by_stalemate,
+    _swing_phrase, _why_loses, _deep_tactics, _created_threat, _solution_moves, _node_at,
+    _node_solutions, _draws_by_stalemate,
 )
 
 # A move_line tree carrying a poisoned line, shaped exactly as preview_drill emits it.
@@ -214,16 +215,50 @@ def test_why_loses_names_the_abandoned_defender():
     assert "rook on e1" in why and "Rxe1" in why
 
 
-def test_why_loses_names_a_move_into_a_guarded_square_with_the_fork_intent():
-    # Nxc6+ played FIRST (premature): the knight would fork the king and queen (the RIGHT idea), but
-    # the d5 bishop still guards c6, so Bxc6 recaptures. The deep read must credit the idea, name the
-    # guard as the mechanism (NOT "undefended"), and point at the guard as the thing to deal with first.
-    why = _why_loses("1k5r/4q3/1pp5/3bNp2/6p1/P5P1/1P3P2/3QRK2 w - - 0 1", "e5c6", ["Bxc6"])
+FORK_FEN = "1k5r/4q3/1pp5/3bNp2/6p1/P5P1/1P3P2/3QRK2 w - - 0 1"   # Nxc6+ forks Kb8+Qe7; Bd5 guards c6
+
+
+def test_why_loses_credits_the_fork_only_when_the_single_solution_earns_it():
+    # Nxc6+ played FIRST (premature): the knight forks the king and queen, but the d5 bishop guards c6,
+    # so Bxc6 recaptures. With a SINGLE solution the idea is only credited when that solution supports
+    # it — here Qxd5 removes the very guard first, so the fork is a genuine mistimed-good-idea: credit
+    # it, name the guard mechanism (NOT 'undefended'), and point at the guard as the thing to deal with.
+    why = _why_loses(FORK_FEN, "e5c6", ["Bxc6"], ["d1d5"], single_solution=True)
     assert why is not None
     assert "fork the king and the queen on e7" in why and "the right idea" in why
     assert "bishop on d5 still guards c6" in why
     assert "deal with first" in why
     assert "undefended" not in why, "a move-into-a-capture is not an 'undefended' story"
+
+
+def test_why_loses_drops_the_fork_credit_when_the_single_solution_ignores_it():
+    # Same real fork, single solution, but the win does something UNRELATED (a3-a4 stand-in): it neither
+    # reuses the fork nor deals with the guard. A real-but-irrelevant fork must NOT be sold as 'the
+    # right idea' (P3: Qxd4+ forks, but the win just grabs a hanging queen) — plain mechanical read.
+    why = _why_loses(FORK_FEN, "e5c6", ["Bxc6"], ["a3a4"], single_solution=True)
+    assert why is not None
+    assert "the right idea" not in why and "deal with first" not in why
+    assert "bishop on d5 still guards c6" in why and "Bxc6" in why   # the MECHANISM always stands
+
+
+def test_why_loses_surfaces_the_fork_when_not_a_single_solution():
+    # Several best moves, or a non-puzzle flow (no solution): we don't second-guess the idea — surface
+    # it as before. The mechanism is derived regardless (a blunder is a blunder).
+    for kwargs in ({}, {"solution_ucis": ["a3a4"], "single_solution": False}):
+        why = _why_loses(FORK_FEN, "e5c6", ["Bxc6"], **kwargs)
+        assert "the right idea" in why and "deal with first" in why, "not-single → old permissive credit"
+        assert "bishop on d5 still guards c6" in why
+
+
+def test_why_loses_does_not_invent_a_fork_for_a_non_fork_move():
+    # Rxe5+ (e1e5) is a simple losing capture into a guarded square — it hits ONLY the king, not a fork.
+    # The single solution Nxd6 removes the guard first, so 'deal with X first' is still earned — but the
+    # wording must NOT claim a fork ('before the fork wins anything') that doesn't exist.
+    why = _why_loses("4k3/8/3b4/4p3/2N5/8/8/4RK2 w - - 0 1", "e1e5", ["Bxe5"], ["c4d6"],
+                     single_solution=True)
+    assert why is not None
+    assert "deal with first" in why and "bishop on d6 still guards e5" in why
+    assert "fork" not in why and "the right idea" not in why, "a non-fork move must not be sold as a fork"
 
 
 def test_why_loses_is_none_without_a_capture_refutation():
@@ -295,6 +330,33 @@ def test_solution_moves_from_the_tree_root():
     assert _solution_moves({"root": {"kind": "mate", "options": [{"san": "Qh7#"}, {"san": "Qb8#"}]}}) \
         == ["Qh7#", "Qb8#"]
     assert _solution_moves(None) == []
+
+
+def test_node_at_anchors_on_the_current_position_and_counts_solutions():
+    # The fork/idea validation anchors on the position the wrong move was played FROM — deep in a
+    # multi-ply drill that is NOT the root — and is gated on the node having a SINGLE best move.
+    tree = {"root": {"kind": "mate", "fen": "ROOT w - - 0 1", "options": [
+        {"uci": "a1a2", "then": {"kind": "reply", "fen": "R1 b - - 0 1", "defenses": [
+            {"uci": "b8b7", "then": {"kind": "solve", "fen": "DEEP w - - 5 3", "expect_uci": "a2a3",
+                                     "after": {"kind": "reply", "defenses": [
+                                         {"uci": "b7b6", "then": {"kind": "done"}}]}}}]}}]}}
+    # clocks are ignored when matching a position
+    assert _node_solutions(_node_at(tree, "ROOT w - - 9 9")) == ["a1a2"]   # single mate option → one
+    assert _node_solutions(_node_at(tree, "DEEP w - - 0 0")) == ["a2a3"]   # anchored at the deeper node
+    assert _node_at(tree, "NOSUCH w - - 0 1") is None                      # off the line → None
+    # A 'mate' node with several options → several best moves (gating must NOT apply).
+    multi = {"root": {"kind": "mate", "fen": "M w - - 0 1",
+                      "options": [{"uci": "a1a2"}, {"uci": "b1b2"}]}}
+    assert _node_solutions(_node_at(multi, "M w - - 0 1")) == ["a1a2", "b1b2"]
+    # Non-puzzle / no tree → no node, no solutions.
+    assert _node_at(None, "x") is None and _node_solutions(None) == []
+    # SIBLING branch: a position reachable only via the SECOND mate option / second defense must still
+    # be found (a wrong move after a Continue plays a sibling defense) — not just the main line.
+    sib = {"root": {"kind": "mate", "fen": "TOP w - - 0 1", "options": [
+        {"uci": "a1a2", "then": {"kind": "done"}},
+        {"uci": "b1b2", "then": {"kind": "reply", "fen": "MID b - - 0 1", "defenses": [
+            {"uci": "h8h7", "then": {"kind": "solve", "fen": "SIB w - - 0 2", "expect_uci": "b2b3"}}]}}]}}
+    assert _node_solutions(_node_at(sib, "SIB w - - 9 9")) == ["b2b3"]   # found on the 2nd option branch
 
 
 def test_draws_by_stalemate_is_grounded_not_inferred():

@@ -269,6 +269,52 @@ def _solution_moves(tree: dict | None) -> list[str]:
     return []
 
 
+def _fen_key(fen: str | None) -> str:
+    """Position identity for matching: placement + side + castling + ep, dropping the move clocks."""
+    return " ".join((fen or "").split()[:4])
+
+
+def _node_at(tree: dict | None, fen: str | None) -> dict | None:
+    """The player node whose position matches `fen` (clocks ignored), or None. Searches the WHOLE
+    solution tree — every mating option and every sibling defense, not just the main line — so a wrong
+    move made deep on a non-first branch (after a Continue plays a sibling defense) still anchors the
+    fork/idea validation on the right position. None for a non-puzzle flow (no tree) or a position off
+    the tree entirely. ('reply' nodes are the opponent; the player nodes are 'solve'/'mate'.)"""
+    target = _fen_key(fen)
+    stack = [(tree or {}).get("root")]
+    for _ in range(400):                                  # bounded search (depth × branching guard)
+        if not stack:
+            break
+        node = stack.pop()
+        if not isinstance(node, dict):
+            continue
+        kind = node.get("kind")
+        if kind in ("solve", "mate") and _fen_key(node.get("fen")) == target:
+            return node
+        if kind == "solve":
+            stack.append(node.get("after"))
+        elif kind == "mate":
+            stack.extend(o.get("then") for o in (node.get("options") or []))
+        elif kind == "reply":
+            stack.extend(d.get("then") for d in (node.get("defenses") or []))
+        # 'done' / unknown → leaf, nothing to push
+    return None
+
+
+def _node_solutions(node: dict | None) -> list[str]:
+    """The solution move UCIs AT a player node — one for 'solve', every mating option for 'mate'. The
+    fork/'idea' validation applies ONLY when there is EXACTLY ONE (a single best move): with several
+    best moves — or in a non-puzzle flow, where there is no node at all — we surface the idea rather
+    than second-guess it against a solution that isn't singular."""
+    if not node:
+        return []
+    if node.get("kind") == "solve":
+        return [node["expect_uci"]] if node.get("expect_uci") else []
+    if node.get("kind") == "mate":
+        return [o.get("uci") for o in (node.get("options") or []) if o.get("uci")]
+    return []
+
+
 def _legal_sans(fen: str | None) -> set[str] | None:
     """The base SANs (trailing +/# stripped) legal in `fen`, or None if unavailable. Used to drop a
     'threat' fact naming a move the just-played move has made impossible — e.g. 'Black threatens
@@ -434,7 +480,8 @@ def _fork_names(targets) -> str:
     return " and ".join(parts)
 
 
-def _why_loses(pre_fen: str | None, uci: str | None, pv: list) -> str | None:
+def _why_loses(pre_fen: str | None, uci: str | None, pv: list, solution_ucis: list | None = None,
+               single_solution: bool = False) -> str | None:
     """Derive the INSTRUCTIVE reason a move drops material — the coaching point, not just the outcome.
     The refutation says WHAT the opponent wins ('Rxe1 wins the rook'); this says WHY it is possible.
     Deterministic, from the board's own defender/attacker sets (`Board.defenders`/`attackers`), so it
@@ -444,6 +491,12 @@ def _why_loses(pre_fen: str | None, uci: str | None, pv: list) -> str | None:
          sac / bad trade). The refuted square IS the move's destination.
       B. You moved a DEFENDER off a piece that then hangs, or ignored an already-hanging piece. The
          refuted square is a different, stationary piece of yours.
+
+    The MECHANISM (why the material drops) is ALWAYS derived — a blunder is a blunder whether or not
+    there is a puzzle. `single_solution` only gates the INTERPRETIVE extras (the fork 'right idea'
+    credit and the 'deal with X first' fix): those are validated against `solution_ucis` ONLY when the
+    position has exactly one best move. With several best moves — or a non-puzzle flow, where there is
+    no solution to check — we don't second-guess the idea; we surface it as before.
 
     Returns a sentence or None (only capture refutations lose material this way). First concrete
     deriver from the tactic-reason-derivation note."""
@@ -466,25 +519,58 @@ def _why_loses(pre_fen: str | None, uci: str | None, pv: list) -> str | None:
         if sq == dest:
             took = next((p for p in b.piece_list() if p.square == dest), None)   # what the move grabbed
             gain = f" and takes the {_PIECE_WORD.get(took.piece.upper(), 'pawn')}" if took else ""
-            # The move's INTENT: does the piece it just moved hit TWO enemy pieces at once? That fork is
-            # WHY the move tempts — the idea is sound, it fails only because the landing square is guarded.
+            # Does the piece it just moved hit TWO enemy pieces at once (a fork)?
             targets = [p for p in after.piece_list()
                        if p.color == opp and dest in after.attackers(p.square, moved.color)]
-            intent = ""
-            if len(targets) >= 2:
-                intent = f"Your {mword} on {dest} would fork {_fork_names(targets)} — the right idea. But "
-            # Name the guard that recaptures — the one whose piece matches the refuting move.
+            # The guard that recaptures — the one whose piece type matches the refuting move.
             want = refute[0] if refute[:1].isupper() else "P"
             guard = next((g for g in after.attackers(dest, opp)
                           if next((p.piece.upper() for p in after.piece_list() if p.square == g), "") == want),
                          None)
+            # The fork "right idea" credit + the "deal with X first" fix are INTERPRETIVE. Gate them on
+            # `single_solution`: only when there is one best move can we say the fork is/ isn't the point.
+            #  • single solution → VALIDATE against it: a real fork can be irrelevant (P3: it forks the
+            #    king and a rook, but the win just grabs a hanging queen), so the idea is earned only if
+            #    the winning line uses the same fork OR first removes the guard; 'deal with X first' only
+            #    if the solution deals with THAT guard.
+            #  • several best moves / no puzzle → surface the idea as before (don't second-guess it).
+            is_fork = len(targets) >= 2
+            same_fork = deals_with_guard = False
+            sol = (solution_ucis or [None])[0]
+            if single_solution and sol:
+                try:
+                    s_from, s_dest = sol[:2].lower(), sol[2:4].lower()
+                    s_mover = next((p for p in b.piece_list() if p.square == s_from), None)
+                    sb = b.apply(sol)
+                    if s_mover and is_fork:
+                        s_hits = {p.square for p in sb.piece_list()
+                                  if p.color == opp and s_dest in sb.attackers(p.square, s_mover.color)}
+                        same_fork = {t.square for t in targets}.issubset(s_hits)
+                    if guard:
+                        deals_with_guard = (s_dest == guard) or (guard not in sb.attackers(dest, opp))
+                except Exception:
+                    pass
+            if single_solution:
+                credit_idea = is_fork and (same_fork or deals_with_guard)
+                deal_first = deals_with_guard
+            else:                                # several best moves / non-puzzle → old permissive behavior
+                credit_idea = deal_first = is_fork
+            intent = (f"Your {mword} on {dest} would fork {_fork_names(targets)} — the right idea. But "
+                      if credit_idea else "")
             if guard:
                 gp = next((p for p in after.piece_list() if p.square == guard), None)
                 gword = _PIECE_WORD.get((gp.piece if gp else "").upper(), "pawn") if gp else "piece"
                 lead = intent or f"Your {mword} moves to {dest}{gain}, but "
-                tail = (f"recaptures before the fork wins anything — that {gword} is what you must deal "
-                        f"with first." if intent else
-                        f"recaptures it, so you just give up the {mword} and come out behind.")
+                if deal_first:
+                    # 'before the fork wins anything' ONLY when it actually IS a fork — a non-fork move
+                    # into a guarded square (single solution removes the guard first) still earns 'deal
+                    # with X first', but must not claim a fork that isn't there.
+                    fork_bit = "before the fork wins anything " if is_fork else ""
+                    tail = f"recaptures {fork_bit}— that {gword} is what you must deal with first."
+                elif credit_idea:            # same_fork: idea already credited in `intent`, don't repeat it
+                    tail = f"recaptures — but the fork must come another way, not from {dest}."
+                else:
+                    tail = f"recaptures it, so you give up the {mword} and come out behind."
                 return f"{lead}the {gword} on {guard} still guards {dest}, so {refute} {tail}"
             return (f"{intent or f'Your {mword} moves to {dest}{gain}, but '}{refute} recaptures it — "
                     f"you give up the {mword}, coming out behind on the exchange.")
