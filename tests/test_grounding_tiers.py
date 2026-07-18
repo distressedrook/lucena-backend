@@ -12,8 +12,20 @@ from __future__ import annotations
 from lucena_backend.coaching.grounding import (
     TieredFacts, tiered_bit_grounding, _brief_move, _brief_reply, _pv_capture_victims, you_move_beat,
     _swing_phrase, _why_loses, _deep_tactics, _created_threat, _solution_moves, _node_at,
-    _node_solutions, _draws_by_stalemate,
+    _node_solutions, _draws_by_stalemate, _numbered_line,
 )
+
+
+def test_numbered_line_is_pgn_style():
+    # White carries the number; Black carries 'N...' ONLY when it OPENS the line, else it is bare.
+    # A refutation PV opening with Black — '1... e5 2. Nf3 Nc6' — the SECOND black move (Nc6) is bare.
+    fen1 = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"   # only parts[5] (fullmove) is read
+    assert _numbered_line(["e5", "Nf3", "Nc6"], fen1, played_by_white=True) == \
+        ["1... e5", "2. Nf3", "Nc6"]
+    # A PV opening with White — every Black reply is bare, none dotted ('… e5 … Nc6').
+    out = _numbered_line(["e4", "e5", "Nf3", "Nc6"], fen1, played_by_white=False)
+    assert out == ["2. e4", "e5", "3. Nf3", "Nc6"]
+    assert not any("..." in m for m in out), "no Black move opens this line → none is dotted"
 
 # A move_line tree carrying a poisoned line, shaped exactly as preview_drill emits it.
 POISONED_TREE = {
@@ -124,10 +136,11 @@ def test_brief_move_labels_each_side_in_the_refutation():
     # Black replies 2... Nef6.
     s = _brief_move(WRONG_EVAL, hide_best=True)
     assert "(White) 2. Qe3" in s, "the refuting move must be attributed to White by colour"
-    assert "(Black) 2... Nef6" in s, "the reply must be attributed to Black by colour"
+    assert "(Black) Nef6" in s, "Black's reply follows White in the line → bare SAN, no '2...'"
+    assert "2... Nef6" not in s, "a Black move following White must not carry the dotted number"
     assert "White refutes it with 2. Qe3" in s
     assert "opponent" not in s and "(you)" not in s, "facts must use colours, not relative words"
-    assert "EXACTLY these 2 move(s)" in s and "ENDS at 2... Nef6" in s, "the line must be hard-bounded"
+    assert "EXACTLY these 2 move(s)" in s and "ENDS at Nef6" in s, "the line must be hard-bounded"
 
 
 def test_brief_move_never_capitalises_a_move_token():
@@ -366,7 +379,7 @@ def test_draws_by_stalemate_is_grounded_not_inferred():
     out = _draws_by_stalemate(FEN, "c3c1", ["Rc3+", "Rxc3"])
     assert out is not None
     assert "DRAWS by STALEMATE" in out
-    assert "7. Rc1 7... Rc3+ 8. Rxc3" in out, "the exact line to the stalemate must be named"
+    assert "7. Rc1 Rc3+ 8. Rxc3" in out, "PGN style: Black's reply after White is bare, not '7... Rc3+'"
     assert "Black has NO legal move" in out and "spare tempo" in out
     assert "Rxh3" not in out, "the solution move must never appear"
 

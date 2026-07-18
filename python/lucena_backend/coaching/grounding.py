@@ -211,8 +211,15 @@ def _numbered_line(pv: list, fen: str | None, *, played_by_white: bool) -> list:
     num = int(parts[5]) + (0 if played_by_white else 1)
     white_to_move = not played_by_white
     out = []
-    for san in pv:
-        out.append(f"{num}. {san}" if white_to_move else f"{num}... {san}")
+    for i, san in enumerate(pv):
+        # PGN style: White carries the number ('5. cxd4'); Black carries 'N...' ONLY when it OPENS the
+        # line (nothing before it), else it is bare ('5. cxd4 Qg1+', not '5. cxd4 5... Qg1+').
+        if white_to_move:
+            out.append(f"{num}. {san}")
+        elif i == 0:
+            out.append(f"{num}... {san}")
+        else:
+            out.append(san)
         if not white_to_move:
             num += 1
         white_to_move = not white_to_move
@@ -391,8 +398,14 @@ def _number_full_line(pre_fen: str | None, sans: list) -> str:
     num = int(parts[5]) if len(parts) > 5 and parts[5].isdigit() else 1
     white = (parts[1] if len(parts) > 1 else "w") == "w"
     out = []
-    for s in sans:
-        out.append(f"{num}. {s}" if white else f"{num}... {s}")
+    for i, s in enumerate(sans):
+        # PGN style: Black carries 'N...' only when it OPENS the line, else bare (see `_numbered_line`).
+        if white:
+            out.append(f"{num}. {s}")
+        elif i == 0:
+            out.append(f"{num}... {s}")
+        else:
+            out.append(s)
         if not white:
             num += 1
         white = not white
