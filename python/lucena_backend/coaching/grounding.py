@@ -211,25 +211,39 @@ def _numbered_line(pv: list, fen: str | None, *, played_by_white: bool) -> list:
 # capture, or a promotion. Deliberately NOT bare pawn pushes like "e4" — those collide with square
 # names ("the rook on c3") and would false-positive; the hallucinations we must catch (Ra4#, Kc8,
 # invented lines) all carry a piece letter, a capture, or a promotion.
+# NB: no trailing \b — a token ending in '+'/'#' has no word boundary after it, so \b would drop the
+# check/mate suffix (and the guard could never tell 'Ra4#' from 'Ra4'). A negative lookahead for a
+# continuing square char is enough to avoid partial matches.
 _SAN_TOKEN = re.compile(
     r"\b(?:O-O-O|O-O|[KQRBN][a-h]?[1-8]?x?[a-h][1-8](?:=[QRBN])?[+#]?"
-    r"|[a-h]x[a-h][1-8](?:=[QRBN])?[+#]?|[a-h][18]=[QRBN][+#]?)\b")
+    r"|[a-h]x[a-h][1-8](?:=[QRBN])?[+#]?|[a-h][18]=[QRBN][+#]?)(?![a-h1-8])")
 
 
 def _move_tokens(text: str | None) -> set[str]:
-    """The SAN move tokens in a string, normalised (check/mate suffix stripped) for comparison."""
-    return {m.rstrip("+#") for m in _SAN_TOKEN.findall(text or "")}
+    """The SAN move tokens in a string, KEEPING the check/mate suffix (so 'Ra4#' and 'Ra4' are
+    distinct — a false mate annotation is itself a hallucination)."""
+    return set(_SAN_TOKEN.findall(text or ""))
 
 
 def _invented_moves(output: str | None, facts: str | None, played: str | None) -> set[str]:
-    """Moves the model NAMED that are NOT grounded — not the move played, not in the facts. The
-    deterministic guard the prompt rules couldn't enforce: flash-lite kept inventing a move (a queen
-    promotion as 'Kb2'; a rook dance as 'Ra4# mate') on perfectly clean grounding. A non-empty result
-    means the verdict is hallucinated and must be regenerated or dropped."""
-    allowed = _move_tokens(facts)
+    """Moves the model NAMED that are NOT grounded. Two hallucinations, both caught:
+      1. the MOVE itself isn't in the facts / isn't the move played (a promotion as 'Kb2').
+      2. the move IS grounded but the model added a CHECK or MATE the facts never gave it ('Ra4#'
+         when the facts have only 'Ra4' — a drawn rook shuffle dressed up as mate). The move's colour
+         is the facts' to state; a '#' the engine didn't write is invention.
+    A non-empty result means the verdict must be regenerated or dropped."""
+    fact_full = _move_tokens(facts)
     if played:
-        allowed.add(played.rstrip("+#"))
-    return _move_tokens(output) - allowed
+        fact_full.add(played)
+    fact_core = {t.rstrip("+#") for t in fact_full}
+    bad = set()
+    for tok in _move_tokens(output):
+        core = tok.rstrip("+#")
+        if core not in fact_core:
+            bad.add(tok)                                   # (1) the move isn't grounded at all
+        elif tok != core and tok not in fact_full:
+            bad.add(tok)                                   # (2) a check/mate the facts never stated
+    return bad
 
 
 def _solution_moves(tree: dict | None) -> list[str]:

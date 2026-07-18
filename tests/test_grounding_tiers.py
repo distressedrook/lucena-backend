@@ -282,9 +282,20 @@ def test_invented_moves_flags_ungrounded_move_tokens():
              "Black threatens Rxc3+ winning the rook.")
     # Ra4#, Kc8, Rb3 are NOT in the facts → invented; Rxc3+ IS grounded → clean.
     assert _invented_moves("Rc4 allows Rb4, a threat of Ra4#; then 8. Rc6 Rb3 9. Kc8.", facts, "Rc4") \
-        == {"Ra4", "Kc8", "Rb3"}
+        == {"Ra4#", "Kc8", "Rb3"}
     assert _invented_moves("Rc4 lets Rb4 threaten Rxc3+, winning your rook.", facts, "Rc4") == set()
     # a queen promotion narrated as a king move
     assert _invented_moves("Your move Kb2 sets up mate.", "Move played: b8=Q+.", "b8=Q+") == {"Kb2"}
     # bare pawn pushes / square mentions must NOT false-positive
     assert _invented_moves("the rook on c3 is loose", facts, "Rc4") == set()
+
+
+def test_invented_moves_catches_a_false_mate_on_a_grounded_move():
+    # The bug the strip-suffix guard missed: the MOVE is grounded (a rook shuffle Ra4 in the pv) but
+    # the model dresses it up as mate ('Ra4#'). A '#' the facts never gave is itself invented.
+    from lucena_backend.coaching.grounding import _invented_moves
+    facts = "7... Rb4 8. Ra4 8... Rb5 9. Rc6. Black threatens Rxc3+."
+    assert _invented_moves("creates a threat of Ra4# you must address", facts, "Rc4") == {"Ra4#"}
+    assert _invented_moves("the opponent plays Ra4, shuffling", facts, "Rc4") == set()  # quiet Ra4 is fine
+    assert _invented_moves("threatens Rxc3+", facts, "Rc4") == set()                    # grounded check
+    assert _invented_moves("plays Rxc3 to win", facts, "Rc4") == set()                  # dropping + is ok
