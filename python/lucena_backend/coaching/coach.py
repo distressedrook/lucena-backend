@@ -14,8 +14,9 @@ import contextvars
 from .bits import BitProgress
 from .grounding import (
     _brief_move, _brief_reply, _created_threat, _deep_tactics, _draws_by_stalemate, _invented_moves,
-    _node_at, _node_solutions, _numbered, _solution_moves, _undermines_defender, _why_loses,
-    tiered_bit_grounding, you_move_beat)
+    _node_at, _node_solutions, _numbered, _solution_moves, _why_loses, tiered_bit_grounding,
+    you_move_beat)
+from ..reasoning import undermines_defender
 from .handler_base import HandlerBase
 from .lesson import ACTIVE, LessonProgress, puzzle_lesson_id, puzzle_spec
 from .loop import Handled, Open, Outcome, Suspend
@@ -369,7 +370,7 @@ class CoachHandler(HandlerBase):
             # THE POINT: prefer the derived causal reason (the reasoner — 'attacks the only defender of
             # the a2 bishop') over the static deep-tactics defender fact; the two overlap and the derived
             # one is the causal, non-redundant version. Fall back to _deep_tactics when it doesn't fire.
-            point = (_undermines_defender(inp.fen, inp.uci)
+            point = (undermines_defender(inp.fen, inp.uci)
                      or _deep_tactics((pre or {}).get("analysis") or [], sols))
             # Point FIRST — it is the reason the move is the move; the capture read and the generic
             # positional context are secondary and must not become the lead.
