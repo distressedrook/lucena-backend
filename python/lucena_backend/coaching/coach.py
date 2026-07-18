@@ -40,24 +40,6 @@ def _color_to_move(fen: str) -> str | None:
     return "white" if parts[1] == "w" else "black"
 
 
-async def _none():
-    """An awaitable that yields None — the second leg of `asyncio.gather` when there's no after-move
-    position to analyse (an unplayable/stale move), so the gather shape stays uniform."""
-    return None
-
-
-def _after_fen(fen: str | None, uci: str | None) -> str | None:
-    """The position right after `uci` is played from `fen`, or None if unplayable. Used to ground a
-    wrong move on the read of what it PRODUCED (the tactical picture), not just the refutation line."""
-    if not fen or not uci:
-        return None
-    try:
-        from lucena_engine.board import Board
-        return Board(fen).apply(uci).fen
-    except Exception:
-        return None
-
-
 class CoachHandler(HandlerBase):
 
     def __init__(self, *, ctx, store, llm, model, ground=None):
@@ -291,28 +273,26 @@ class CoachHandler(HandlerBase):
             move_read = _brief_move(verdict, hide_best=False)
             positional = "\n".join(str(x) for x in getattr(grounding, "always", []) or [])
             return move_read + (f"\n{positional}" if positional else "")
-        # WRONG move — give it enough to explain the flaw properly, three grounded layers (the outcome
+        # WRONG move — give it enough to explain the flaw properly, all PLAYER-anchored (the outcome
         # alone read as "reduces your advantage" for a game-losing blunder):
-        #   1. `_brief_move` — the class, the eval SWING (winning→losing), the refutation line.
-        #   2. `_why_loses` — the INSTRUCTIVE mechanism (you walked a defender off / left a piece
-        #      hanging), derived deterministically from the board so it is grounded, not guessed.
-        #   3. the read of the position the move PRODUCED — the true eval + both sides' threats — not
-        #      the pre-move positional read, which said "winning" and made the model soften the blunder.
-        after = _after_fen(inp.fen, inp.uci)
-        verdict, after_read = await asyncio.gather(
-            asyncio.to_thread(self.ground.evaluate, inp.fen, [inp.uci]),
-            asyncio.to_thread(self.ground.analyze_and_show, after, focus="analysis", board_push=False)
-            if after else _none())
+        #   1. `_brief_move` — the class, the eval SWING (winning→losing/equal), the refutation line.
+        #   2. `_why_loses` — the INSTRUCTIVE mechanism (you walked a defender off / moved into a
+        #      guarded square), derived deterministically from the board so it is grounded, not guessed.
+        #   3. `_deep_tactics` — the PRE-move position's resources/linchpins, solution stripped.
+        # NOT the AFTER-move analysis: that position is the OPPONENT's turn, so its "the opponent
+        # threatens …" phrasing is computed from the opponent's seat and inverts relative to the player
+        # — it narrated Black's threat as White's ("a threat for black, not white") and fed the model a
+        # stray mate-threat it chained into an invented "mate in 2". The swing already gives the eval.
+        verdict = await asyncio.to_thread(self.ground.evaluate, inp.fen, [inp.uci])
         move_read = _brief_move(verdict, hide_best=True)
         why = _why_loses(inp.fen, inp.uci, verdict.get("refutation_pv"))
-        after_txt = "\n".join(str(x) for x in ((after_read or {}).get("analysis") or []))
         # The engine's OWN deep read of the position — the defensive resources (a killer check like
         # Rh1+) and structural linchpins (the c6-pawn/d5-bishop mutual defence) it already computes —
         # with the solution move stripped. This is how the coach can "see this far": explain why the
         # naive tries fail and what the real knot is, without handing over the answer.
         tree = (bit.spec.params or {}).get("tree") if (bit and getattr(bit, "spec", None)) else None
         deep = _deep_tactics(getattr(grounding, "always", []), _solution_moves(tree))
-        return "\n".join(p for p in (move_read, why, after_txt, deep) if p)
+        return "\n".join(p for p in (move_read, why, deep) if p)
 
     def _apply_board_effects(self, effects) -> None:
         """Move the board to reflect a move_line bit's advance — the player's move AND the walker's

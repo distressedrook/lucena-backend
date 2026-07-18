@@ -123,7 +123,8 @@ def test_brief_move_labels_each_side_in_the_refutation():
     s = _brief_move(WRONG_EVAL, hide_best=True)
     assert "(opponent) 2. Qe3" in s, "the refuting move must be attributed to the opponent"
     assert "(you) 2... Nef6" in s, "the reply must be attributed to the player"
-    assert "the refutation opens with the opponent's Qe3" in s
+    assert "The opponent refutes it with 2. Qe3" in s
+    assert "EXACTLY these 2 move(s)" in s and "ENDS at 2... Nef6" in s, "the line must be hard-bounded"
 
 
 def test_brief_move_never_capitalises_a_move_token():

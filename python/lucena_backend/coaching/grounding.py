@@ -390,13 +390,14 @@ def _brief_move(v: dict, *, hide_best: bool = False) -> str:
         dest = first.rstrip("+#")[-2:]
         phrase = f"a {piece} captures the {victims[0]} on {dest}" if victims and victims[0] \
             else _move_phrase(first)
+        last = numbered[-1] if numbered else first
         out.append(f"The opponent refutes it with {numbered[0] if numbered else first} "
-                   f"({phrase}); the line then runs {labeled}. Explain the flaw through THIS line — the "
-                   f"refutation opens with the opponent's {first} (a {piece} move). You MAY walk the "
-                   f"line further to show why it stays bad — including your own attempts to recover "
-                   f"(e.g. grabbing a piece back) and how the opponent meets them (a check that flips "
-                   f"it) — but invent no move or motif the line does not contain. Name a captured "
-                   f"piece ONLY as written here — never guess what stands on a square.")
+                   f"({phrase}). The refutation line is EXACTLY these {len(numbered)} move(s) and no "
+                   f"more: {labeled}. It ENDS at {last}. Explain the flaw using ONLY these moves — you "
+                   f"may describe what they achieve (a piece won, a trade forced, a position reached), "
+                   f"but you must NOT add, extend, or invent any move after {last}: no further check, "
+                   f"fork, or 'mate in N' unless it literally appears above. If the line is short, the "
+                   f"explanation is short. Name a captured piece ONLY as written here — never guess.")
     return "\n".join(out)
 
 
