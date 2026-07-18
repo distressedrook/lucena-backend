@@ -19,6 +19,7 @@ class _Store:
     def __init__(self, lesson):
         self._lesson = lesson
         self.beats = []
+        self._history = [{"n": 0, "san": None, "uci": None, "fen": "8/8/8/8/8/8/8/8 w - - 0 1"}]
 
     def active_lesson(self):
         return self._lesson
@@ -45,7 +46,7 @@ class _Strat:
     def __init__(self, reply):
         self._reply = reply
 
-    async def adjudicate(self, inp, grounding, spec, prog):
+    async def adjudicate(self, inp, grounding, spec, prog, history=None):
         new_prog = replace(prog, attempts=prog.attempts + 1, cleared=False)
         return True, new_prog, {"board": None, "plies": None, "reply": self._reply}
 

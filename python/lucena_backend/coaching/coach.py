@@ -88,7 +88,10 @@ class CoachHandler(HandlerBase):
         if inp.kind == "move" and inp.san is None and inp.fen:      # canonical SAN for adjudication
             inp.san = self.ground.san_of(inp.fen, inp.uci) or None
         grounding = await self._ground_for_bit(bit)
-        correct, new_prog, effects = await strat.adjudicate(inp, grounding, bit.spec, bit.progress)
+        # Hand the walker the session's current move line — it lives in the document history, not in
+        # the serialized walker state, so `restore` needs it to keep the line coherent across moves.
+        correct, new_prog, effects = await strat.adjudicate(
+            inp, grounding, bit.spec, bit.progress, history=self.store._history)
         lesson.set_bit_progress(bit.index, new_prog)
         self.store.save_lesson_progress(lesson.progress)
         self._apply_board_effects(effects)                          # move + auto-played opponent reply

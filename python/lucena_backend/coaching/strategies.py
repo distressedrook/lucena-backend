@@ -26,8 +26,8 @@ from .bits import BitProgress, BitSpec
 
 
 class Strategy(Protocol):
-    async def adjudicate(self, inp, grounding, spec: BitSpec, prog: BitProgress
-                         ) -> tuple[bool, BitProgress, dict | None]: ...
+    async def adjudicate(self, inp, grounding, spec: BitSpec, prog: BitProgress,
+                         history: list | None = None) -> tuple[bool, BitProgress, dict | None]: ...
     # Returns (was_this_input_right, new_progress, effects). `effects` carries board changes for a
     # move strategy — {"board": fen_after_reply, "plies": move_line} — so the handler updates the
     # board (incl. the opponent's auto-played reply); None for non-board strategies (free_text).
@@ -44,9 +44,13 @@ class MoveLineStrategy:
     `walker.finished`. Deterministic. `strategy_state` is `DrillState.to_state()`; the board move
     line has its ONE home in the session history, so it is NOT carried here (matches drill.py)."""
 
-    async def adjudicate(self, inp, grounding, spec, prog):
+    async def adjudicate(self, inp, grounding, spec, prog, history=None):
         tree = spec.params["tree"]
-        walker = (DrillState.restore(tree, prog.strategy_state)
+        # `line=history` is REQUIRED, not optional: the walker's move line is not in `to_state()` (its
+        # ONE home is the session history), so a restore without it defaults the line to just [root].
+        # Missing it corrupted the line on the NEXT move — a backtrack truncated the wrong prefix and
+        # the recorded history came out scrambled (Rxc3 landed at ply 1, the first move lost).
+        walker = (DrillState.restore(tree, prog.strategy_state, line=history)
                   if prog.strategy_state else DrillState(tree))
         uci, san = _move_of(inp)
         result = walker.play(uci or "", san)
@@ -63,7 +67,7 @@ class MoveExactStrategy:
     """A single expected move (a degenerate `move_line`). Matches on SAN first, uci fallback — the
     same canonical rule as `DrillState`. Single-shot: `cleared = correct`."""
 
-    async def adjudicate(self, inp, grounding, spec, prog):
+    async def adjudicate(self, inp, grounding, spec, prog, history=None):
         uci, san = _move_of(inp)
         correct = _same_move(san, uci, spec.params.get("expect_san"), spec.params.get("expect_uci"))
         new_prog = replace(prog, attempts=prog.attempts + 1, cleared=correct)
@@ -81,7 +85,7 @@ class FreeTextStrategy:
     def __init__(self, grade_fn: GradeFn):
         self._grade = grade_fn
 
-    async def adjudicate(self, inp, grounding, spec, prog):
+    async def adjudicate(self, inp, grounding, spec, prog, history=None):
         text = getattr(inp, "text", "") or ""
         correct, _extras = await self._grade(text, spec, grounding)
         new_prog = replace(prog, attempts=prog.attempts + 1, cleared=correct)
