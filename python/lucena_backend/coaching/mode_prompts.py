@@ -146,9 +146,21 @@ class VerdictPrompt:
     {text}."""
 
     _RIGHT = (
-        "The player just played the RIGHT move in this coaching exercise. In ONE short, warm sentence, "
-        "name the IDEA that makes it work — the point of the move — grounded ONLY in the facts. Do NOT "
-        "state the next move or continue the line; do NOT cite win% or centipawns."
+        "The player just played the RIGHT move in this coaching exercise. In 2-4 short sentences, teach "
+        "the POINT of the move — grounded ONLY in the facts, warm throughout. Use EVERY specific insight "
+        "the facts give you; do not flatten a rich point to a bare 'nice, that wins the piece'. Cover, "
+        "in order:\n"
+        "(a) CONFIRM it warmly — name the move and that it's right in one clause (the badge already says "
+        "correct, so keep this light).\n"
+        "(b) THE IDEA — what the move concretely achieves, using the specific facts (a piece won, a "
+        "mating net, the winning resource, the positional gain).\n"
+        "(c) THE POINT — the instructive heart: if the facts name the position's linchpin or the "
+        "resource the simple tries stumble into (a stalemate trap the win must dodge, a saving check "
+        "like Rh1+, a mutually-defending pair), explain how THIS move handles it — that is WHY it is the "
+        "move. If the facts name no such point, skip this beat rather than invent one.\n"
+        "HARD LIMITS: do NOT state or hint at the NEXT move, and do NOT continue the line past the move "
+        "just played — the continuation is the un-played puzzle and naming it spoils it. Describe only "
+        "what the played move itself accomplishes and why. Do NOT cite win% or centipawns."
     )
     _WRONG = (
         "The player just played a move that is NOT the answer. In 2-4 short sentences, explain the flaw "

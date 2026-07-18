@@ -16,9 +16,10 @@ from lucena_backend.coaching.loop import Input
 
 
 class FakeGround:
-    """Stands in for the read-only ground ctx: only `evaluate` is exercised by _move_facts."""
-    def __init__(self, evaluations):
+    """Stands in for the read-only ground ctx: `evaluate` + `analyze_and_show` are exercised."""
+    def __init__(self, evaluations, analysis=None):
         self._evals = evaluations           # {uci: eval-dict}
+        self._analysis = analysis or []     # pre-move deep read (drives _deep_tactics on both paths)
         self.calls = []
 
     def evaluate(self, fen, ucis):
@@ -26,7 +27,7 @@ class FakeGround:
         return self._evals[ucis[0]]
 
     def analyze_and_show(self, fen, **kw):
-        return {"analysis": []}          # deep-tactics grounds on inp.fen via this; empty is fine here
+        return {"analysis": self._analysis}
 
 
 def _handler(ground):
@@ -57,6 +58,18 @@ def test_right_verdict_includes_engine_facts_and_positional_read():
     s = _facts(_handler(FakeGround({"b5c4": RIGHT})), "b5c4", correct=True)
     assert "bxc4 wins the bishop on c4" in s, "the move's own 'why' must be grounded"
     assert "Black is up a bishop." in s, "the safe positional (always) tier must be included"
+
+
+def test_right_verdict_carries_the_deep_point():
+    # A correct verdict is a mini-lesson: it now gets the pre-move position's tactical POINT (the
+    # linchpin / resource the simple tries fail against) — the SAME deep read the wrong path gets, so
+    # the praise is instructive instead of a bare "nice, that wins the piece". (Solution-stripping of
+    # the deep read is covered on the wrong path in test_grounding_tiers.)
+    analysis = ["Tactics: Rh1+ is a saving check for White; the c6/d5 pawns mutually defend."]
+    g = FakeGround({"b5c4": RIGHT}, analysis=analysis)
+    s = _facts(_handler(g), "b5c4", correct=True)
+    assert "Rh1+" in s, "the deep tactical point (the defensive resource) must reach the verdict"
+    assert "Key tactical features" in s, "deep-tactics framing must be present on the right path"
 
 
 def test_right_verdict_drops_the_refutation_framing():

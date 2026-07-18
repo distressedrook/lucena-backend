@@ -355,7 +355,16 @@ class CoachHandler(HandlerBase):
             verdict = {k: v for k, v in verdict.items() if k != "refutation_pv"}
             move_read = _brief_move(verdict, hide_best=False)
             positional = "\n".join(str(x) for x in getattr(grounding, "always", []) or [])
-            return move_read + (f"\n{positional}" if positional else "")
+            # THE POINT of the move — the pre-move position's tactical linchpin / defensive resource
+            # (why the simple tries fail, the stalemate trap the win must dodge, a saving check it
+            # defeats). Same deep read the WRONG path gets, solution-stripped so it teaches the idea
+            # WITHOUT naming the un-played continuation — a correct verdict becomes a mini-lesson, not a
+            # bare "nice, that wins the piece". Grounded on inp.fen (pre-move, player to move).
+            tree = (bit.spec.params or {}).get("tree") if (bit and getattr(bit, "spec", None)) else None
+            pre = await asyncio.to_thread(self.ground.analyze_and_show, inp.fen,
+                                          focus="analysis", board_push=False)
+            deep = _deep_tactics((pre or {}).get("analysis") or [], _solution_moves(tree))
+            return "\n".join(p for p in (move_read, positional or None, deep) if p)
         # WRONG move — give it enough to explain the flaw properly, all PLAYER-anchored (the outcome
         # alone read as "reduces your advantage" for a game-losing blunder):
         #   1. `_brief_move` — the class, the eval SWING (winning→losing/equal), the refutation line.
