@@ -55,3 +55,27 @@ status (OPEN / FIXED / WONTFIX).
 - **The deeper fix remains parked:** derive WHY a combination wins deterministically ("tactic reason
   derivation") so the mechanism is grounded, not narrated.
 - **Status:** Defect A FIXED (leniency); Defect B WATCH.
+
+## P3 — queen fork, `Qxd4+` — OPEN (folds into the relevance-filter work)
+
+- **FEN:** `3r3k/pp3B1p/8/6q1/3p1Q2/2P5/P1P5/1K6 w - - 0 4`  ·  **move:** `Qxd4+` (uci f4d4)  ·  **wrong**
+- **What the coach said:**
+  > Your move Qxd4+ captures the pawn but turns your winning position into a losing one.
+  > - **Your idea to fork the king and the rook on d8 is correct.**
+  > - Black refutes this with 4... Rxd4, which captures your queen because the rook on d8 still guards that square.
+  > - The resulting sequence 5. cxd4 Qg1+ 6. Kb2 Qxd4+ 7. Kb3 leaves you down material.
+  > - **You must deal with the rook on d8 first.**
+- **Defect:** two UNVALIDATED interpretive claims from `_why_loses` CASE A:
+  1. *"Your idea to fork … is correct"* — fires whenever the played move hits 2 enemy pieces, with NO
+     check against the solution. Here it's especially wrong: the forked rook (d8) is the very piece
+     defending the fork square, so the "fork" is self-defeating, not a right idea done wrong.
+  2. *"You must deal with the rook on d8 first"* — same: prescribed from the refutation, never checked
+     against what the solution actually does first.
+- **Root cause (the bigger one, per the reframe):** the grounding SURFACES ALL tactical motifs and the
+  model force-fits whichever fits the sentence. `_why_loses` adds heuristic idea/fix claims;
+  `_deep_tactics` dumps every structural feature. None is filtered for RELEVANCE to why-this-move-fails
+  / why-the-solution-works.
+- **Direction (chosen):** don't point-patch the fork claim — fold it into "surface only what matters,
+  in a proper format" (relevance-filtered, structured grounding). A claim about the *idea*/*fix* is
+  only earned if the SOLUTION line supports it.
+- **Status:** OPEN — subsumed by the relevance-filter task.
