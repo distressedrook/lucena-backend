@@ -59,8 +59,22 @@ class MoveLineStrategy:
         # Board effects: the position AFTER the player's move + the walker's auto-played opponent
         # reply, plus the full move line — so the handler moves the board (and shows the reply).
         effects = {"board": result.get("board"), "plies": result.get("plies"),
-                   "reply": result.get("reply")}   # the opponent's auto-played reply → its own beat
+                   "reply": result.get("reply"),   # the opponent's auto-played reply → its own beat
+                   "await_continue": result.get("await_continue")}   # branch solved, sibling held for Continue
         return bool(result.get("correct")), new_prog, effects
+
+    async def continue_branch(self, spec, prog, history=None):
+        """Walk the next sibling defence — the DEFERRED backtrack, run when the player clicks Continue.
+        Restores the walker, pops the held sibling, and returns (new_progress, effects) to paint the
+        board. `effects` is None when nothing was pending."""
+        walker = DrillState.restore(spec.params["tree"], prog.strategy_state, line=history)
+        result = walker.continue_branch()
+        new_prog = replace(prog, strategy_state=walker.to_state(), cleared=walker.finished)
+        if result is None:
+            return new_prog, None
+        effects = {"board": result.get("board"), "plies": result.get("plies"),
+                   "reply": result.get("reply")}
+        return new_prog, effects
 
 
 class MoveExactStrategy:

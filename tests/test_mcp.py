@@ -1430,7 +1430,9 @@ def test_drill_walker_serializes_through_a_backtrack():
         ]}}}
     d = DrillState(tree)
     d.play("a1a2", "Ra2")                      # solve root -> auto-play the first defense
-    d.play("c1c2", "Rc2")                      # solve branch A -> backtrack onto branch B
+    r = d.play("c1c2", "Rc2")                  # solve branch A -> HOLD (Continue pending), no backtrack yet
+    assert r["await_continue"] is True
+    d.continue_branch()                        # Continue -> backtrack onto branch B
     assert d.current.get("fen") == "F2b" and d.solved == 2 and not d.stack and not d.finished
 
     # simulate a restart: serialize, then restore against a FRESHLY-parsed tree (new object identities)

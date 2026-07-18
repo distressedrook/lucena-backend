@@ -138,6 +138,8 @@ def build_app(*, home: str, llm=None, model: str = _DEFAULT_MODEL,
         elif t == "move":
             await loop.handle_input(sid, _Input(kind="move", uci=msg.get("uci"), fen=msg.get("fen"),
                                                 client_id=msg.get("client_id")))
+        elif t == "continue":                       # the player clicked Continue → walk the next branch
+            await loop.handle_input(sid, _Input(kind="continue"))
         elif t == "position":                       # navigation: report the board being shown (NOT a turn)
             await asyncio.to_thread(store.set_board_view, msg.get("fen"))
         elif t == "view":

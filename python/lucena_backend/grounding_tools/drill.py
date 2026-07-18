@@ -90,6 +90,9 @@ class DrillState:
         # (node, defense-san, defense-uci, branch_len) — branch_len = the line length at the point
         # this sibling branches from, so a backtrack truncates the line back to it.
         self.stack: list[tuple[dict, str | None, str | None, int]] = []
+        # A branch is solved but sibling defences remain — HELD until the player clicks Continue, so the
+        # board stays on the solution instead of jumping. `continue_branch()` does the deferred backtrack.
+        self.awaiting_continue = False
         self._i = {"correct": 0, "wrong": 0, "backtrack": 0}
         # The move line currently on the board, ply 0 = the starting position. Each ply is
         # {n, san, uci, fen (after the ply)}. Truncated + rewritten on a backtrack so it always
@@ -144,7 +147,8 @@ class DrillState:
         board, event, extra, finished = self._advance(chosen_then)
         return {"correct": True, "board": board, "feedback": feedback,
                 "extra": extra, "finished": finished, "event": event, "plies": list(self.line),
-                "reply": (event or {}).get("reply")}   # the opponent's auto-played reply, if any
+                "reply": (event or {}).get("reply"),   # the opponent's auto-played reply, if any
+                "await_continue": (event or {}).get("await_continue")}   # branch solved, sibling pending
 
     def _advance(self, node: dict | None):
         # `node` is the position after your move. For a non-reply node (a one-move win → `done`),
@@ -169,20 +173,32 @@ class DrillState:
 
     def _next_or_finish(self, board: str | None = None):
         if self.stack:
-            node, defense, defense_uci, branch_len = self.stack.pop()
-            self.current = node
-            fen = node.get("fen")
-            self.line = self.line[:branch_len]        # rewind to the branch point …
-            branch_fen = self.line[-1]["fen"] if self.line else None   # position the sibling is played FROM
-            self._add_ply(defense, defense_uci, fen)  # … then take the sibling defense
-            # Surface the sibling as a reply flagged `new_line`, so the coach ANNOUNCES the backtrack
-            # ("that defence is handled — now the opponent tries a different one") instead of the board
-            # silently jumping back to the branch point (the "weird state" the player saw).
-            reply = {"san": defense, "uci": defense_uci, "from_fen": branch_fen, "new_line": True}
-            return (fen,
-                    {"kind": "drill", "event": "new_line", "defense": defense, "fen": fen, "reply": reply},
-                    drill_feedback.backtrack_beat(self._bump("backtrack"), defense),
-                    False)
+            # A sibling defence remains, but HOLD — do NOT backtrack now. The board stays on the just-
+            # solved position; the coach offers a Continue button, and `continue_branch()` does the
+            # actual pop only when the player clicks it. (Was: jump straight to the sibling — jarring.)
+            self.awaiting_continue = True
+            return (board, {"kind": "drill", "event": "branch_done", "await_continue": True, "fen": board},
+                    None, False)
+        self.finished = True
+        return board, {"kind": "drill_solved", "fen": board}, drill_feedback.finish_beat(self.tree), True
+
+    def continue_branch(self) -> dict | None:
+        """The deferred backtrack — run only when the player clicks Continue. Pop the held sibling
+        defence, rewind the line to its branch point, play it, and return the board effects. None when
+        nothing is pending (already finished/no siblings)."""
+        self.awaiting_continue = False
+        if not self.stack:
+            self.finished = True
+            return None
+        node, defense, defense_uci, branch_len = self.stack.pop()
+        self.current = node
+        fen = node.get("fen")
+        self.line = self.line[:branch_len]            # rewind to the branch point …
+        branch_fen = self.line[-1]["fen"] if self.line else None   # position the sibling is played FROM
+        self._add_ply(defense, defense_uci, fen)      # … then take the sibling defence
+        self._bump("backtrack")
+        reply = {"san": defense, "uci": defense_uci, "from_fen": branch_fen, "new_line": True}
+        return {"board": fen, "plies": list(self.line), "reply": reply, "finished": self.finished}
         self.finished = True
         # The whole tree is solved — tell the coach so it can give a grounded closing (the app also
         # posts this on `finished`; the single-slot input mailbox de-dupes the two identical writes).
@@ -208,6 +224,7 @@ class DrillState:
             "current": _node_path(root, self.current),
             "solved": self.solved,
             "finished": self.finished,
+            "awaiting_continue": self.awaiting_continue,   # a branch is held, Continue pending
             "stack": [{"path": _node_path(root, node), "san": san, "uci": uci, "branch_len": bl}
                       for (node, san, uci, bl) in self.stack],
             "counters": dict(self._i),
@@ -224,6 +241,7 @@ class DrillState:
         d.current = _resolve_path(root, state.get("current"))
         d.solved = int(state.get("solved") or 0)
         d.finished = bool(state.get("finished"))
+        d.awaiting_continue = bool(state.get("awaiting_continue"))
         d.stack = [(_resolve_path(root, e.get("path")), e.get("san"), e.get("uci"), e.get("branch_len"))
                    for e in (state.get("stack") or [])]
         if state.get("counters"):

@@ -47,20 +47,23 @@ def test_records_your_move_and_the_played_defense():
     assert r["plies"][1]["fen"] == "AFTER_E4" and r["plies"][2]["fen"] == "AFTER_A6"
 
 
-def test_backtrack_truncates_to_the_branch_point():
+def test_backtrack_is_HELD_until_continue():
     d = DrillState(TREE)
     d.play("e2e4", "e4")                 # line: [start, e4, a6], now solving d4
-    r = d.play("d2d4", "d4")             # refutes a6-line → backtracks to the h6 defense
-    # the a6 sub-line (…a6, d4) is rewound; the board is now the h6 line
-    assert _sans(r["plies"]) == [None, "e4", "h6"]
-    assert r["plies"][2]["fen"] == "AFTER_H6"
-    assert r["event"]["event"] == "new_line"
+    r = d.play("d2d4", "d4")             # completes the a6-line → HOLDS (Continue pending), no backtrack yet
+    assert r["await_continue"] is True and r["event"]["event"] == "branch_done"
+    assert _sans(r["plies"]) == [None, "e4", "a6", "d4"], "the board STAYS on the solution"
+    c = d.continue_branch()              # Continue → NOW backtrack to the h6 defense
+    assert _sans(c["plies"]) == [None, "e4", "h6"]
+    assert c["plies"][2]["fen"] == "AFTER_H6"
+    assert c["reply"]["new_line"] is True
 
 
 def test_full_walk_ends_on_the_current_line():
     d = DrillState(TREE)
     d.play("e2e4", "e4")
-    d.play("d2d4", "d4")                 # → h6 line
+    d.play("d2d4", "d4")                 # → branch solved, HELD
+    d.continue_branch()                  # Continue → h6 line
     r = d.play("g1f3", "Nf3")            # solves the h6 line → done
     assert _sans(r["plies"]) == [None, "e4", "h6", "Nf3"]
     assert r["finished"] is True

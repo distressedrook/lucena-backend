@@ -110,5 +110,4 @@ def test_new_line_reply_announces_the_backtrack_deterministically():
     reply = {"san": "Rxh3", "uci": "b3h3", "new_line": True,
              "from_fen": "k7/2K5/1P6/8/7p/1r5R/7P/8 b - - 0 7"}
     text = asyncio.run(h._reply_text(reply, "white"))
-    assert "That defence is handled" in text
-    assert "7... Rxh3" in text and "Find the win again" in text
+    assert "Your opponent tries 7... Rxh3" in text and "Find the win again" in text

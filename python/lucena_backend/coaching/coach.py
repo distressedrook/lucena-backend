@@ -59,6 +59,8 @@ class CoachHandler(HandlerBase):
             return Handled()
         if inp.kind == "move":
             return await self._adjudicate(lesson, bit, inp)
+        if inp.kind == "continue":                # the player clicked Continue → walk the next branch
+            return await self._continue_branch(lesson, bit)
         j = await self._gen_json(CoachTurnPrompt.system(bit),
                                  CoachTurnPrompt.prompt(text=inp.text, bit=bit,
                                                     convo=self._recent(6)))
@@ -106,7 +108,11 @@ class CoachHandler(HandlerBase):
         # Record the result for a synchronous caller (REST /move) BEFORE the slow why-wrong narration,
         # so the app gets {drill,correct,finished} promptly (the board already moved via the stream).
         finished = bool(new_prog.cleared and lesson._all_required_cleared())
-        move_result.set({"drill": True, "correct": bool(correct), "finished": finished})
+        # A branch is solved but sibling defences remain — HELD behind a Continue button. The app reads
+        # `await_continue` from this result to surface the button; the board stays on the solution.
+        await_continue = bool((effects or {}).get("await_continue")) if correct else False
+        move_result.set({"drill": True, "correct": bool(correct), "finished": finished,
+                         "await_continue": await_continue})
 
         # Two beats on a correct mid-line move: (1) the verdict — what YOU did; (2) the opponent's
         # auto-played reply — what THEY did. Independent grounding, so generate concurrently (one LLM
@@ -119,6 +125,12 @@ class CoachHandler(HandlerBase):
                 self._reply_text(reply, player_color))
             self._say(vtext, tone="praise")
             self._say(rtext, tone="teach")
+        elif await_continue:
+            # Solved this branch — offer to walk the next sibling defence. The board STAYS on the
+            # solution; the backtrack runs only when the player clicks Continue (→ inp.kind "continue").
+            self._say(await self._verdict_text(inp, grounding, correct, player_color, bit), tone="praise")
+            self._say("That defence is handled — but your opponent has other tries. Continue?",
+                      tone="teach")
         else:
             self._say(await self._verdict_text(inp, grounding, correct, player_color, bit),
                       tone="praise" if correct else "correct")
@@ -129,6 +141,27 @@ class CoachHandler(HandlerBase):
             lesson.advance_currentBit()
             self.store.save_lesson_progress(lesson.progress)
             await self._present_bit(lesson.current_bit())
+        return Handled()
+
+    async def _continue_branch(self, lesson, bit) -> Outcome:
+        """The player clicked Continue — walk the next sibling defence (the deferred backtrack). Paint
+        the branch-point position + the opponent's new defence, then announce it. No-op if nothing was
+        actually held (defensive: a stale/duplicate click)."""
+        strat = self._strategies.get(bit.spec.strategy)
+        if strat is None or not hasattr(strat, "continue_branch"):
+            return Handled()
+        new_prog, effects = await strat.continue_branch(bit.spec, bit.progress, history=self.store._history)
+        lesson.set_bit_progress(bit.index, new_prog)
+        self.store.save_lesson_progress(lesson.progress)
+        finished = bool(new_prog.cleared and lesson._all_required_cleared())
+        move_result.set({"drill": True, "correct": True, "finished": finished, "await_continue": False})
+        if effects:
+            self._apply_board_effects(effects)     # NOW paint the sibling position (the branch-point walk)
+            if reply := effects.get("reply"):
+                self._say(await self._reply_text(reply, _color_to_move(reply.get("from_fen"))),
+                          tone="teach")
+        if new_prog.cleared and finished:
+            return await self._conclude(lesson)
         return Handled()
 
     async def _conclude(self, lesson) -> Outcome:
@@ -259,8 +292,7 @@ class CoachHandler(HandlerBase):
         # can't hallucinate) so the jump reads as a new challenge, not a glitch (the "weird state").
         if reply.get("new_line"):
             numbered = _numbered(san, reply.get("from_fen"))
-            return (f"That defence is handled. Now your opponent tries a different one — {numbered}. "
-                    f"Find the win again from here.")
+            return f"Your opponent tries {numbered}. Find the win again from here."
         facts = _brief_reply(reply.get("from_fen"), san)
         out = await self._gen_json(OpponentReplyPrompt.system(player_color=player_color),
                                    OpponentReplyPrompt.prompt(facts=facts))

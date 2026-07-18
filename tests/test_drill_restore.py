@@ -31,9 +31,11 @@ def test_restore_with_line_survives_a_backtrack():
 
     # A fresh walker per move (as the strategy does), restored WITH the line:
     d2 = DrillState.restore(TREE, state, line=hist)
-    r = d2.play("c1c2", "B")                  # solve line 1 → backtrack to sibling d2
-    assert _line(r["plies"]) == [(None, None), ("A", "a1a2"), ("d2", "e1e2")], _line(r["plies"])
-    assert (r.get("reply") or {}).get("new_line") is True
+    r = d2.play("c1c2", "B")                  # solve line 1 → HELD (Continue pending), no backtrack yet
+    assert r["await_continue"] is True
+    c = d2.continue_branch()                  # Continue → backtrack to sibling d2
+    assert _line(c["plies"]) == [(None, None), ("A", "a1a2"), ("d2", "e1e2")], _line(c["plies"])
+    assert (c.get("reply") or {}).get("new_line") is True
 
 
 def test_restore_without_line_is_the_bug_we_fixed():
@@ -41,6 +43,7 @@ def test_restore_without_line_is_the_bug_we_fixed():
     d = DrillState(TREE)
     d.play("a1a2", "A")
     d2 = DrillState.restore(TREE, d.to_state())    # NO line
-    r = d2.play("c1c2", "B")
-    assert _line(r["plies"]) != [(None, None), ("A", "a1a2"), ("d2", "e1e2")], \
+    d2.play("c1c2", "B")
+    c = d2.continue_branch()
+    assert _line(c["plies"]) != [(None, None), ("A", "a1a2"), ("d2", "e1e2")], \
         "without the line the history is scrambled — that was the bug"
