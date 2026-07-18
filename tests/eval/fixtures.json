@@ -1,0 +1,51 @@
+{
+  "_comment": "SKETCH seed fixtures for the verdict-gloss eval. `facts` is FROZEN (snapshot the real _move_facts output and human-review it before trusting). `expect` holds fixture-scoped deterministic checks; the generic graders (invented_moves, label_prefix, format_shape, eval_numbers) run on every fixture. Grow this to ~15-20.",
+  "fixtures": [
+    {
+      "id": "rook-dance-rc4-wrong",
+      "note": "The stale-threat case. Rc4 moves the rook off c3, so Rxc3+ is impossible; the real refutation is Rb4 (equalises). Must NOT say deal-with-Rxc3.",
+      "fen": "k7/2K5/1P6/8/7p/1rR4p/7P/8 w - - 0 7",
+      "uci": "c3c4",
+      "san": "Rc4",
+      "correct": false,
+      "player_color": "white",
+      "solution_sans": ["Rxh3"],
+      "facts": "Move played: Rc4\nEngine class of this move: blunder.\nThis move turns a winning position into an equal one for you.\nBlack refutes it with 7... Rb4 (a rook moves to b4). It ENDS at 7... Rb4.\nThe move just played creates this threat: White threatens mate: Ra4#.",
+      "expect": {
+        "must_not_contain": ["Rxc3", "deal with"],
+        "must_mention_any": ["Rb4"],
+        "color": "white"
+      }
+    },
+    {
+      "id": "rook-dance-rxh3-right",
+      "note": "Correct move. Point is stalemate-avoidance/forced mate; grounding only surfaces the Rxc3+ feature, so watch for a fabricated causal link (the live 'removing the pawn that supports the attack' bug).",
+      "fen": "k7/2K5/1P6/8/7p/1rR4p/7P/8 w - - 0 7",
+      "uci": "c3h3",
+      "san": "Rxh3",
+      "correct": true,
+      "player_color": "white",
+      "solution_sans": ["Rxh3"],
+      "facts": "Move played: Rxh3\nIt captures the pawn.\nEngine class of this move: brilliant.\nWhite to move; White has a forced mate in 4.\nKey tactical features of the position — surface the one that explains why simple tries fail (a defensive resource, a mutually-defending pair): Black threatens Rxc3+, winning White's rook on c3.",
+      "expect": {
+        "must_not_contain": ["removing the pawn", "supports the attack"],
+        "color": "white"
+      }
+    },
+    {
+      "id": "fork-nxe4-wrong",
+      "note": "Placeholder — replace facts with a real frozen _move_facts snapshot for a fork blunder. Solution must never leak.",
+      "fen": "PLACEHOLDER_FEN",
+      "uci": "f6e4",
+      "san": "Nxe4",
+      "correct": false,
+      "player_color": "black",
+      "solution_sans": ["bxc4"],
+      "facts": "FROZEN_FACTS_PLACEHOLDER",
+      "expect": {
+        "must_not_contain": ["bxc4"],
+        "color": "black"
+      }
+    }
+  ]
+}
