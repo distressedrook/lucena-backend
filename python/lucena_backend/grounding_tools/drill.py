@@ -173,9 +173,14 @@ class DrillState:
             self.current = node
             fen = node.get("fen")
             self.line = self.line[:branch_len]        # rewind to the branch point …
+            branch_fen = self.line[-1]["fen"] if self.line else None   # position the sibling is played FROM
             self._add_ply(defense, defense_uci, fen)  # … then take the sibling defense
+            # Surface the sibling as a reply flagged `new_line`, so the coach ANNOUNCES the backtrack
+            # ("that defence is handled — now the opponent tries a different one") instead of the board
+            # silently jumping back to the branch point (the "weird state" the player saw).
+            reply = {"san": defense, "uci": defense_uci, "from_fen": branch_fen, "new_line": True}
             return (fen,
-                    {"kind": "drill", "event": "new_line", "defense": defense, "fen": fen},
+                    {"kind": "drill", "event": "new_line", "defense": defense, "fen": fen, "reply": reply},
                     drill_feedback.backtrack_beat(self._bump("backtrack"), defense),
                     False)
         self.finished = True

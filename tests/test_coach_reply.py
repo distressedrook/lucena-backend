@@ -99,3 +99,15 @@ def test_no_reply_still_echoes_the_move_then_the_verdict():
     h = _handler(store, None)          # walker returned no reply (line ended / wrong move)
     asyncio.run(h.handle(Input(kind="move", uci="d1d5", san="Qxd5", fen=FEN)))
     assert _texts(store) == ["Played Qxd5 — takes the bishop", "VERDICT"]
+
+
+def test_new_line_reply_announces_the_backtrack_deterministically():
+    # A sibling-defence backtrack surfaces a reply flagged new_line; _reply_text must announce it
+    # (no LLM — it's deterministic) so the board jump reads as a fresh challenge, not a glitch.
+    from lucena_backend.coaching.coach import CoachHandler
+    h = CoachHandler(ctx=object(), store=object(), llm=object(), model="stub", ground=object())
+    reply = {"san": "Rxh3", "uci": "b3h3", "new_line": True,
+             "from_fen": "k7/2K5/1P6/8/7p/1r5R/7P/8 b - - 0 7"}
+    text = asyncio.run(h._reply_text(reply, "white"))
+    assert "That defence is handled" in text
+    assert "7... Rxh3" in text and "Find the win again" in text

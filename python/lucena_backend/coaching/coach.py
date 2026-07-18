@@ -13,8 +13,8 @@ import contextvars
 
 from .bits import BitProgress
 from .grounding import (
-    _brief_move, _brief_reply, _deep_tactics, _draws_by_stalemate, _solution_moves, _why_loses,
-    tiered_bit_grounding, you_move_beat)
+    _brief_move, _brief_reply, _deep_tactics, _draws_by_stalemate, _numbered, _solution_moves,
+    _why_loses, tiered_bit_grounding, you_move_beat)
 from .handler_base import HandlerBase
 from .lesson import ACTIVE, LessonProgress, puzzle_lesson_id, puzzle_spec
 from .loop import Handled, Open, Outcome, Suspend
@@ -250,10 +250,17 @@ class CoachHandler(HandlerBase):
     async def _reply_text(self, reply: dict, player_color: str | None) -> str:
         """Voice the opponent's auto-played reply (the second beat). Grounded on `_brief_reply` — the
         one move, its capture, check — so it states what happened without inventing a plan or motif."""
-        facts = _brief_reply(reply.get("from_fen"), reply.get("san"))
+        san = reply.get("san") or ""
+        # A BACKTRACK to a sibling defence: the board just jumped back to the branch point and the
+        # opponent is trying a DIFFERENT defence. Announce it plainly (deterministic — no LLM, so it
+        # can't hallucinate) so the jump reads as a new challenge, not a glitch (the "weird state").
+        if reply.get("new_line"):
+            numbered = _numbered(san, reply.get("from_fen"))
+            return (f"That defence is handled. Now your opponent tries a different one — {numbered}. "
+                    f"Find the win again from here.")
+        facts = _brief_reply(reply.get("from_fen"), san)
         out = await self._gen_json(OpponentReplyPrompt.system(player_color=player_color),
                                    OpponentReplyPrompt.prompt(facts=facts))
-        san = reply.get("san") or ""
         return out.get("text") or (f"Your opponent replies {san}." if san else "")
 
     async def _move_facts(self, inp, correct: bool, grounding, bit=None) -> str:
