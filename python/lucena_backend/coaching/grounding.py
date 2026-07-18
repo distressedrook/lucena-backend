@@ -196,6 +196,38 @@ def _numbered_line(pv: list, fen: str | None, *, played_by_white: bool) -> list:
     return out
 
 
+def _solution_moves(tree: dict | None) -> list[str]:
+    """The move(s) the puzzle expects at the root — the answer, which the deep-tactics read must NOT
+    name to a solver. `solve` → its one required move; `mate` → any of the mating options."""
+    root = (tree or {}).get("root") or {}
+    if root.get("kind") == "solve" and root.get("expect_san"):
+        return [root["expect_san"]]
+    if root.get("kind") == "mate":
+        return [o.get("san") for o in (root.get("options") or []) if o.get("san")]
+    return []
+
+
+def _deep_tactics(always_lines, solution_moves) -> str | None:
+    """The engine's OWN deep read of the position — the defensive resources and structural linchpins
+    it already computes (the null-move 'ignore Rh1+ and you go from winning to losing', the defender
+    'the pawn on c6 is the only defender of the bishop on d5') — MINUS the one clause that names the
+    solution. The `combination` detector announces 'a forcing sequence starting with <answer>', which
+    would spoil the puzzle, so any clause naming a solution move is dropped. This is how the coach
+    explains WHY the position is subtle (the Rh1+ resource, the mutual-defence knot) without handing
+    over the move. None if there is no tactical line or nothing survives the strip."""
+    for line in (always_lines or []):
+        if not str(line).startswith("Tactics:"):
+            continue
+        body = str(line)[len("Tactics:"):].strip().rstrip(".")
+        kept = [c.strip() for c in body.split(";")
+                if not any(m and m in c for m in solution_moves)]
+        if kept:
+            return ("Key tactical features of the position — surface the one that explains why simple "
+                    "tries fail (a defensive resource like a saving check, a mutually-defending pair): "
+                    + "; ".join(kept) + ".")
+    return None
+
+
 def _win_band(wp: float) -> str:
     """A win% (player POV) → a plain assessment word. Coarse on purpose: the coach voices the BAND,
     never the number (reciting '19%' is not a coaching sentence, and the exact figure is noise)."""
@@ -356,9 +388,12 @@ def _brief_move(v: dict, *, hide_best: bool = False) -> str:
         phrase = f"a {piece} captures the {victims[0]} on {dest}" if victims and victims[0] \
             else _move_phrase(first)
         out.append(f"The opponent refutes it with {numbered[0] if numbered else first} "
-                   f"({phrase}); the line then runs {labeled}. Explain the flaw ONLY through this line — "
-                   f"the refuting move is the opponent's {first}, a {piece} move, nothing else. Name a "
-                   f"captured piece ONLY as written here — never guess what stands on a square.")
+                   f"({phrase}); the line then runs {labeled}. Explain the flaw through THIS line — the "
+                   f"refutation opens with the opponent's {first} (a {piece} move). You MAY walk the "
+                   f"line further to show why it stays bad — including your own attempts to recover "
+                   f"(e.g. grabbing a piece back) and how the opponent meets them (a check that flips "
+                   f"it) — but invent no move or motif the line does not contain. Name a captured "
+                   f"piece ONLY as written here — never guess what stands on a square.")
     return "\n".join(out)
 
 

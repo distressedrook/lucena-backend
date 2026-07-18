@@ -63,7 +63,7 @@ def _handler(store, reply):
     h._strategies = type("R", (), {"get": lambda self, k: _Strat(reply)})()
     # stub grounding + both LLM-voiced beats so we assert wiring, not model prose
     h._ground_for_bit = lambda bit: _async(None)
-    h._verdict_text = lambda inp, g, correct, color: _async("VERDICT")
+    h._verdict_text = lambda inp, g, correct, color, bit=None: _async("VERDICT")
     h._reply_text = lambda reply, color: _async(f"REPLY:{reply['san']}")
     return h
 

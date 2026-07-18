@@ -12,7 +12,9 @@ import asyncio
 import contextvars
 
 from .bits import BitProgress
-from .grounding import _brief_move, _brief_reply, _why_loses, tiered_bit_grounding, you_move_beat
+from .grounding import (
+    _brief_move, _brief_reply, _deep_tactics, _solution_moves, _why_loses,
+    tiered_bit_grounding, you_move_beat)
 from .handler_base import HandlerBase
 from .lesson import ACTIVE, LessonProgress, puzzle_lesson_id, puzzle_spec
 from .loop import Handled, Open, Outcome, Suspend
@@ -128,12 +130,12 @@ class CoachHandler(HandlerBase):
         reply = (effects or {}).get("reply") if correct else None
         if reply:
             vtext, rtext = await asyncio.gather(
-                self._verdict_text(inp, grounding, correct, player_color),
+                self._verdict_text(inp, grounding, correct, player_color, bit),
                 self._reply_text(reply, player_color))
             self._say(vtext, tone="praise")
             self._say(rtext, tone="teach")
         else:
-            self._say(await self._verdict_text(inp, grounding, correct, player_color),
+            self._say(await self._verdict_text(inp, grounding, correct, player_color, bit),
                       tone="praise" if correct else "correct")
 
         if new_prog.cleared:
@@ -249,7 +251,7 @@ class CoachHandler(HandlerBase):
         j = await self._gen_json(GradePrompt.system(), GradePrompt.prompt(text, facts))
         return bool(j.get("correct")), j
 
-    async def _verdict_text(self, inp, grounding, correct: bool, player_color: str | None) -> str:
+    async def _verdict_text(self, inp, grounding, correct: bool, player_color: str | None, bit=None) -> str:
         # Symmetric feedback (right names the idea, wrong the flaw). Ground it in the PLAYED MOVE's
         # actual engine read — NOT `solve_text()`. §4 strips the solution from solve_text() so it can't
         # leak WHILE solving; but by verdict time the move is already on the board, so grounding "why
@@ -257,7 +259,7 @@ class CoachHandler(HandlerBase):
         # the stripped facts left the model nothing to explain from, so it invented a rationale.
         # `player_color` (the answer's PRE-move side to move) is the fixed perspective anchor — the
         # board now shows the opponent to move, so "you play the side to move" flips White/Black.
-        facts = await self._move_facts(inp, correct, grounding)
+        facts = await self._move_facts(inp, correct, grounding, bit)
         attempt = inp.san or inp.uci or (inp.text or "")
         out = await self._gen_json(VerdictPrompt.system(correct=correct, player_color=player_color),
                                    VerdictPrompt.prompt(attempt=attempt, facts=facts))
@@ -272,7 +274,7 @@ class CoachHandler(HandlerBase):
         san = reply.get("san") or ""
         return out.get("text") or (f"Your opponent replies {san}." if san else "")
 
-    async def _move_facts(self, inp, correct: bool, grounding) -> str:
+    async def _move_facts(self, inp, correct: bool, grounding, bit=None) -> str:
         """Grounding for the verdict. A MOVE answer → the engine's read of the move just played
         (`evaluate`): the full read when correct (nothing to hide, it is on the board), the refutation
         with the best move HIDDEN when wrong (explain the flaw without naming the solution). Add the
@@ -304,7 +306,13 @@ class CoachHandler(HandlerBase):
         move_read = _brief_move(verdict, hide_best=True)
         why = _why_loses(inp.fen, inp.uci, verdict.get("refutation_pv"))
         after_txt = "\n".join(str(x) for x in ((after_read or {}).get("analysis") or []))
-        return "\n".join(p for p in (move_read, why, after_txt) if p)
+        # The engine's OWN deep read of the position — the defensive resources (a killer check like
+        # Rh1+) and structural linchpins (the c6-pawn/d5-bishop mutual defence) it already computes —
+        # with the solution move stripped. This is how the coach can "see this far": explain why the
+        # naive tries fail and what the real knot is, without handing over the answer.
+        tree = (bit.spec.params or {}).get("tree") if (bit and getattr(bit, "spec", None)) else None
+        deep = _deep_tactics(getattr(grounding, "always", []), _solution_moves(tree))
+        return "\n".join(p for p in (move_read, why, after_txt, deep) if p)
 
     def _apply_board_effects(self, effects) -> None:
         """Move the board to reflect a move_line bit's advance — the player's move AND the walker's

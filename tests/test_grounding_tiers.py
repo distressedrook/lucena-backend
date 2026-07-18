@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from lucena_backend.coaching.grounding import (
     TieredFacts, tiered_bit_grounding, _brief_move, _brief_reply, _pv_capture_victims, you_move_beat,
-    _swing_phrase, _why_loses,
+    _swing_phrase, _why_loses, _deep_tactics, _solution_moves,
 )
 
 # A move_line tree carrying a poisoned line, shaped exactly as preview_drill emits it.
@@ -123,7 +123,7 @@ def test_brief_move_labels_each_side_in_the_refutation():
     s = _brief_move(WRONG_EVAL, hide_best=True)
     assert "(opponent) 2. Qe3" in s, "the refuting move must be attributed to the opponent"
     assert "(you) 2... Nef6" in s, "the reply must be attributed to the player"
-    assert "the refuting move is the opponent's Qe3" in s
+    assert "the refutation opens with the opponent's Qe3" in s
 
 
 def test_brief_move_never_capitalises_a_move_token():
@@ -224,6 +224,31 @@ def test_why_loses_names_a_move_into_a_guarded_square_with_the_fork_intent():
 def test_why_loses_is_none_without_a_capture_refutation():
     assert _why_loses("8/1k2N3/1p6/3p1p2/6p1/P5P1/1P3P2/4RK1r w - - 1 4", "f1g2", ["Kb7"]) is None
     assert _why_loses(None, "f1g2", ["Rxe1"]) is None
+
+
+def test_deep_tactics_keeps_resources_but_strips_the_solution():
+    # The engine's tactical read names the SOLUTION (a 'forcing sequence starting with Qxd5') alongside
+    # safe deep facts (the Rh1+ resource, the c6/d5 linchpin). The verdict must keep the safe facts and
+    # drop the solution-naming clause — so the coach explains the trap without spoiling the answer.
+    always = ["White to move; White is winning (eval +4.7, White 85%).",
+              "Tactics: a forcing sequence starting with Qxd5 sacrifices material but wins; "
+              "warning — ignore Rh1+ and you go from winning to losing; the pawn on c6 is the only "
+              "defender of the bishop on d5."]
+    out = _deep_tactics(always, ["Qxd5"])
+    assert out is not None
+    assert "Qxd5" not in out, "the solution move must be stripped"
+    assert "ignore Rh1+" in out and "only defender of the bishop on d5" in out
+
+
+def test_deep_tactics_none_without_a_tactics_line():
+    assert _deep_tactics(["White is winning."], ["Qxd5"]) is None
+
+
+def test_solution_moves_from_the_tree_root():
+    assert _solution_moves({"root": {"kind": "solve", "expect_san": "Qxd5"}}) == ["Qxd5"]
+    assert _solution_moves({"root": {"kind": "mate", "options": [{"san": "Qh7#"}, {"san": "Qb8#"}]}}) \
+        == ["Qh7#", "Qb8#"]
+    assert _solution_moves(None) == []
 
 
 def test_brief_move_handles_error_and_empty():
