@@ -111,3 +111,14 @@ def test_new_line_reply_announces_the_backtrack_deterministically():
              "from_fen": "k7/2K5/1P6/8/7p/1r5R/7P/8 b - - 0 7"}
     text = asyncio.run(h._reply_text(reply, "white"))
     assert "Your opponent tries 7... Rxh3" in text and "Find the win again" in text
+
+
+def test_normalize_promotion_defaults_bare_uci_to_queen():
+    # A bare 'b7b8' is read by the engine as b8=N (knight) — the promotion bug. Default it to queen;
+    # leave suffixed / non-promotion moves untouched.
+    from lucena_backend.coaching.coach import _normalize_promotion
+    FEN = "8/kPK5/8/8/8/8/8/8 w - - 0 1"
+    assert _normalize_promotion(FEN, "b7b8") == "b7b8q"      # queen, not knight
+    assert _normalize_promotion(FEN, "b7b8q") == "b7b8q"     # already chosen — untouched
+    assert _normalize_promotion(FEN, "b7b8n") == "b7b8n"     # a real underpromotion is kept
+    assert _normalize_promotion("8/8/8/8/8/8/4K3/4k3 w - - 0 1", "e2e3") == "e2e3"  # not a promotion

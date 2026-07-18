@@ -31,6 +31,26 @@ move_result: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
     "coach_move_result", default=None)
 
 
+def _normalize_promotion(fen: str | None, uci: str | None) -> str | None:
+    """A bare promotion uci ('b7b8') is read by the engine as an UNDERpromotion to KNIGHT — so a queen
+    promotion came out as 'b8=N' in the verdict. The app now sends the piece ('b7b8q'), but default a
+    suffix-less pawn-to-last-rank move to QUEEN so an old client / stray input can't silently
+    underpromote. Leaves any move that already carries a suffix (or isn't a promotion) untouched."""
+    if not fen or not uci or len(uci) != 4:
+        return uci
+    try:
+        from lucena_engine.board import Board
+        src, dst_rank = uci[:2], uci[3]
+        if dst_rank not in ("1", "8"):
+            return uci
+        piece = next((p for p in Board(fen).piece_list() if p.square == src), None)
+        if piece and piece.piece.upper() == "P":
+            return uci + "q"
+    except Exception:
+        pass
+    return uci
+
+
 def _color_to_move(fen: str) -> str | None:
     """"white"/"black" from a FEN's active-colour field, or None if unreadable. In a verdict the
     answer's FEN is the PRE-move position, so this is the player's own colour."""
@@ -87,6 +107,8 @@ class CoachHandler(HandlerBase):
         if strat is None:
             self._say("This exercise type isn't wired yet.")
             return Handled()
+        if inp.kind == "move" and inp.uci and inp.fen:              # bare promotion 'b7b8' → queen, not knight
+            inp.uci = _normalize_promotion(inp.fen, inp.uci)
         if inp.kind == "move" and inp.san is None and inp.fen:      # canonical SAN for adjudication
             inp.san = self.ground.san_of(inp.fen, inp.uci) or None
         grounding = await self._ground_for_bit(bit)
