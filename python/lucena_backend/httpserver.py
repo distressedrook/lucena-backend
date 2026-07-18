@@ -123,6 +123,15 @@ def build_app(*, home: str, llm=None, model: str = _DEFAULT_MODEL,
             # A typed turn: a FEN-shaped message is a POSITION set-up (Input.position), everything else
             # is chat (Input.text). The FEN-detection lives here so the loop sees a resolved kind.
             text = msg.get("text") or ""
+            # Echo the player's own words as a persisted "you" beat BEFORE the loop runs — the app has
+            # already rendered it optimistically under `client_id`; persisting+broadcasting it here makes
+            # it durable (survives reconnect's snapshot) and reconcilable (the app matches the nonce so
+            # the message isn't shown twice). Only when there's text to echo.
+            if text:
+                with store.bound(sid):
+                    await asyncio.to_thread(store.append_beats, [
+                        {"kind": "you", "stops": False, "client_id": msg.get("client_id"),
+                         "segments": [{"text": text}]}])
             inp = (_Input(kind="position", text=text) if _FEN_RE.search(text)
                    else _Input(kind="text", text=text))
             await loop.handle_input(sid, inp)
