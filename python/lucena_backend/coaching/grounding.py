@@ -15,9 +15,10 @@ from dataclasses import dataclass, field
 # `_numbered`) and baked into the SAN wherever a move is interpolated into CONTEXT/facts text —
 # this just tells the model to keep what it was given rather than strip it or roll its own.
 _MOVE_NUMBER_RULE = (
-    "MOVE NUMBERS: moves you were given already carry their move number — \"12. Nf3\", "
-    "\"12... Nf3\" for Black. Keep that exact form when you name them; never write the bare SAN "
-    "alone, and never invent a number for a move that wasn't handed to you numbered.\n"
+    "MOVE NUMBERS: keep each move's number EXACTLY as handed to you — never add, strip, or invent one. "
+    "Lines are PGN-style: White carries the number (\"12. Nf3\"); a Black move carries \"N...\" ONLY "
+    "when it OPENS a line (\"12... Nf3\"), and is BARE when it follows White's move in the same line "
+    "(\"5. cxd4 Qg1+\", NEVER \"5. cxd4 5... Qg1+\"). A move handed to you bare stays bare.\n"
     "MOVE TOKENS (critical): the ONLY moves you may name are the move the player just played and the "
     "moves written in the facts. NEVER write any other move — a plausible-looking move that is not "
     "there (a queen promotion narrated as \"Kb2\") is a hallucination. If you are unsure of a move's "
