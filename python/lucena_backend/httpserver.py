@@ -30,6 +30,38 @@ from .grounding_tools.tools import ToolContext
 # set-up rather than chat. Same shape as the orchestrator's own detector.
 _FEN_RE = re.compile(r"(?:[pnbrqkPNBRQK1-8]+/){7}[pnbrqkPNBRQK1-8]+\s+[wb]\b")
 
+
+def _walk_target(store, view: dict | None) -> dict | None:
+    """The variation move a fresh /view has walked ONTO and the coach should now comment on, or None.
+
+    Walking a variation is the shared analysis board stepping through a sideline — the app reports it as
+    a `view` (fen + cursor + resolved line), never a `move`. This picks out the comment-worthy ones and
+    is the single gate on when a walk speaks. It fires ONLY when:
+      - the cursor sits on a `variation` row (not the mainline prefix that flows into the sideline), and
+      - no Lesson owns the chat (a walk is browsing, never a drill answer — silent during a drill), and
+      - `mark_walked` claims this move for the first time (once per move landed on — stepping BACKWARD
+        onto or re-visiting a move already read stays silent).
+    Reads `active_lesson`/`mark_walked` on `store`, so the caller must run it with the chat bound.
+    Returns `{fen, san, uci}` for the move, or None to stay silent."""
+    if not view or not view.get("in_variation"):
+        return None
+    line = view.get("line") or []
+    cur = view.get("cursor")
+    if not isinstance(cur, int) or not (0 <= cur < len(line)):
+        return None
+    node = line[cur] or {}
+    if node.get("kind") != "variation":            # cursor on the mainline prefix → not a walk
+        return None
+    san, uci = node.get("san"), node.get("uci")
+    fen = node.get("fen") or view.get("fen")
+    if not (san or uci) or not fen:
+        return None
+    if store.active_lesson() is not None:          # a lesson owns the chat → walks stay silent
+        return None
+    if not store.mark_walked(fen):                 # already read this move → silent re-visit
+        return None
+    return {"fen": fen, "san": san, "uci": uci}
+
 _DEFAULT_MODEL = os.environ.get("LUCENA_MODEL", "gemini-flash-lite-latest")
 # Engine pool sizing. Every knob is explicit and env-overridable because the cost is real and per
 # instance: `size` concurrent analyses, each a Stockfish process holding `hash_mb`. The floor is
@@ -117,7 +149,14 @@ def build_app(*, home: str, llm=None, model: str = _DEFAULT_MODEL,
     app.state.store = store
     app.state.ctx = ctx
 
-    async def _dispatch(msg: dict, sid: str) -> None:
+    def _set_view_and_walk(msg: dict):
+        """The /view fast path AND its slow follow-up decision, together in the worker thread (where the
+        bound-chat context is live): report the board (fast, ordered, ALWAYS) and, if this /view walked
+        onto a fresh sideline move, return the `walk` Input to run the comment in the background."""
+        walk = _walk_target(store, store.set_view(msg))
+        return _Input(kind="walk", fen=walk["fen"], san=walk["san"], uci=walk["uci"]) if walk else None
+
+    async def _dispatch(msg: dict, sid: str):
         t = msg.get("type")
         if t == "turn":
             # A typed turn: a FEN-shaped message is a POSITION set-up (Input.position), everything else
@@ -143,19 +182,22 @@ def build_app(*, home: str, llm=None, model: str = _DEFAULT_MODEL,
         elif t == "position":                       # navigation: report the board being shown (NOT a turn)
             await asyncio.to_thread(store.set_board_view, msg.get("fen"))
         elif t == "view":
-            await asyncio.to_thread(store.set_view, msg)
+            # Report the board inline (fast, ordered), and if this /view landed on a fresh variation
+            # move, hand back a `walk` Input so the caller runs the (slow, LLM) comment in the background.
+            return await asyncio.to_thread(_set_view_and_walk, msg)
         elif t == "input":
             await asyncio.to_thread(store.set_input, msg.get("data") or msg)
         # RETIRED (folded into the loop): `explain` (QuickCoach) → freeform move-explain;
         # `drill` (old arm path) → coach-mode lesson entry. Both intentionally no longer routed.
 
-    async def _handle(msg: dict, sid: str) -> None:
+    async def _handle(msg: dict, sid: str):
         # The transport has no catch-all: an unhandled error here (an LLM outage, a bad move) would
         # break the WS receive loop and drop the connection mid-turn, leaving the app spinning on a
         # status that never clears. Contain it — clear the working status and surface a plain beat so
-        # the player always gets an answer, and the socket stays up.
+        # the player always gets an answer, and the socket stays up. Returns the dispatch result (a
+        # `walk` Input to run as a slow follow-up, or None).
         try:
-            await _dispatch(msg, sid)
+            return await _dispatch(msg, sid)
         except Exception as exc:  # noqa: BLE001
             with store.bound(sid):          # the apology belongs to THIS chat, not whatever is current
                 store.publish_status(None)
@@ -165,6 +207,17 @@ def build_app(*, home: str, llm=None, model: str = _DEFAULT_MODEL,
                                           "is still set, so try that again in a moment."}],
                 }])
             print(f"[_handle] {msg.get('type')} failed: {exc!r}", flush=True)
+            return None
+
+    async def _handle_walk(inp, sid: str) -> None:
+        # A variation-walk comment is AMBIENT — the player is browsing a line, not asking a question — so
+        # a failure clears the working status QUIETLY, with no apology beat (unlike a real turn/move).
+        try:
+            await loop.handle_input(sid, inp)
+        except Exception as exc:  # noqa: BLE001
+            with store.bound(sid):
+                store.publish_status(None)
+            print(f"[_handle_walk] failed: {exc!r}", flush=True)
 
     # Loop work (turn AND move) can take several seconds of LLM+engine work — both now flow through the
     # unified loop, which may narrate. Running INLINE in the receive loop would block every other
@@ -239,8 +292,16 @@ def build_app(*, home: str, llm=None, model: str = _DEFAULT_MODEL,
                         bg.add(task)
                         task.add_done_callback(bg.discard)
                     else:
+                        # Fast, ordered, inline. A /view may hand back a `walk` Input — the slow (LLM)
+                        # variation-walk comment — which then runs as a tracked background task like a
+                        # move, so rapid stepping never blocks the receive loop.
                         with store.bound(sid):
-                            await _handle(msg, sid)
+                            walk = await _handle(msg, sid)
+                        if walk is not None:
+                            with store.bound(sid):
+                                wtask = asyncio.create_task(_handle_walk(walk, sid))
+                            bg.add(wtask)
+                            wtask.add_done_callback(bg.discard)
             finally:
                 sender.cancel()
                 for t in bg:

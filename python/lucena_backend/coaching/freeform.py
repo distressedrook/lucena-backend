@@ -37,6 +37,8 @@ class FreeformHandler(HandlerBase):
             return await self._on_position(inp)
         if inp.kind == "move":
             return await self._on_move(inp)
+        if inp.kind == "walk":
+            return await self._on_walk(inp)
         return await self._on_text(inp)
 
     # -- deterministic-grounding triggers: ALWAYS a grounded answer, no classifier -----------------
@@ -91,6 +93,20 @@ class FreeformHandler(HandlerBase):
         out = await self._gen_json(ReadPrompt.system(),
                                    ReadPrompt.prompt(facts=_brief(facts),
                                                               played=inp.san or inp.uci))
+        self._say(out.get("text") or "")
+        return Handled()
+
+    async def _on_walk(self, inp) -> Outcome:
+        # Walking a variation: the app has ALREADY moved the shared analysis board onto a sideline move
+        # (via the /view report), so — unlike `_on_move` — we do NOT re-apply it. We just ground the
+        # position now on the board and read the move that reached it, exactly like a plain freeform
+        # move-explain. Book narration is intentionally skipped: a variation is exploratory analysis, not
+        # the game's opening line. Upstream has deduped + gated, so reaching here means "read this move".
+        fen = inp.fen or self.store.board_view
+        facts = await self._ground(fen)
+        out = await self._gen_json(ReadPrompt.system(),
+                                   ReadPrompt.prompt(facts=_brief(facts),
+                                                     played=inp.san or inp.uci))
         self._say(out.get("text") or "")
         return Handled()
 

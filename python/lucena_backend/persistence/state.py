@@ -131,6 +131,10 @@ class _Live:
     # NEVER leak across a switch/new-session: the app→coach input mailbox. (The "current board fen" is NOT
     # a separate field — it derives from the one session board, `last_board`; see StateStore.board_view.)
     input: dict | None = None
+    # Post-move fens the coach has ALREADY commented on while walking a variation — so stepping BACKWARD
+    # onto or re-visiting a move it already read stays silent (one comment per move landed on). Transient:
+    # a fresh session/reconnect starts empty, and re-walking then is a fine re-read.
+    walked: set = field(default_factory=set)
 
     @property
     def top(self) -> _Frame:
@@ -789,6 +793,15 @@ class StateStore:
         """Thin channel (`POST /position`): the app reports the fen it's displaying → updates the one
         session board (the source of truth for `board_fen`)."""
         self._report_board(fen)
+
+    def mark_walked(self, fen: str | None) -> bool:
+        """Claim `fen` as 'the coach has now commented on this walked move'. Returns True the FIRST time
+        (→ comment on it) and False on every re-visit (→ silent). Idempotent + transient, so walking a
+        variation forward comments each new move but stepping back over seen ones says nothing."""
+        if not fen or fen in self._cur.walked:
+            return False
+        self._cur.walked.add(fen)
+        return True
 
     @property
     def view(self) -> dict | None:

@@ -195,6 +195,26 @@ def test_status_cleared_even_when_a_handler_raises():
     assert s.status_calls == ["Thinking…", None], "status must be cleared in finally on error"
 
 
+def test_walk_routes_to_freeform_and_never_to_coach():
+    # Walking a variation is a freeform read of a sideline move — never a drill answer. The loop must
+    # hand it to freeform even when a lesson is active (upstream already gates it silent during a drill;
+    # if a walk reaches the loop, it is always a freeform read, never adjudicated by coach).
+    s = FakeStore(); s.active = _Lesson()
+    ff = FakeHandler(); co = FakeCoach(store=s)
+    _run(s, ff, co, Input(kind="walk", fen="…", san="Nf3"))
+    assert len(ff.seen) == 1 and ff.seen[0].kind == "walk", "a walk must go to freeform"
+    assert len(co.seen) == 0, "a walk must never reach coach"
+
+
+def test_walk_does_not_reroute():
+    # Even if freeform returned a transition Outcome, a walk is terminal — the loop must not re-route it.
+    s = FakeStore()
+    ff = FakeHandler([EnterCoach(type="puzzle", source={"kind": "current"})])
+    co = FakeCoach(store=s, enter_ok=True)
+    _run(s, ff, co, Input(kind="walk", fen="…", san="Nf3"))
+    assert len(co.entered) == 0 and len(co.seen) == 0, "a walk must not trigger a re-route into coach"
+
+
 def test_resolve_mode_is_pure_state():
     s = FakeStore()
     loop = ConversationLoop(store=s, freeform=FakeHandler(), coach=FakeCoach(store=s))
