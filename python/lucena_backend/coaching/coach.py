@@ -12,7 +12,7 @@ import asyncio
 import contextvars
 
 from .bits import BitProgress
-from .grounding import _brief_move, _brief_reply, tiered_bit_grounding, you_move_beat
+from .grounding import _brief_move, _brief_reply, _why_loses, tiered_bit_grounding, you_move_beat
 from .handler_base import HandlerBase
 from .lesson import ACTIVE, LessonProgress, puzzle_lesson_id, puzzle_spec
 from .loop import Handled, Open, Outcome, Suspend
@@ -36,6 +36,24 @@ def _color_to_move(fen: str) -> str | None:
     if len(parts) < 2 or parts[1] not in ("w", "b"):
         return None
     return "white" if parts[1] == "w" else "black"
+
+
+async def _none():
+    """An awaitable that yields None — the second leg of `asyncio.gather` when there's no after-move
+    position to analyse (an unplayable/stale move), so the gather shape stays uniform."""
+    return None
+
+
+def _after_fen(fen: str | None, uci: str | None) -> str | None:
+    """The position right after `uci` is played from `fen`, or None if unplayable. Used to ground a
+    wrong move on the read of what it PRODUCED (the tactical picture), not just the refutation line."""
+    if not fen or not uci:
+        return None
+    try:
+        from lucena_engine.board import Board
+        return Board(fen).apply(uci).fen
+    except Exception:
+        return None
 
 
 class CoachHandler(HandlerBase):
@@ -262,15 +280,31 @@ class CoachHandler(HandlerBase):
         (free_text, no move) has nothing to evaluate, so it keeps the solve-time facts."""
         if not inp.uci or not inp.fen:
             return grounding.solve_text() if hasattr(grounding, "solve_text") else str(grounding)
-        verdict = await asyncio.to_thread(self.ground.evaluate, inp.fen, [inp.uci])
         if correct:
+            verdict = await asyncio.to_thread(self.ground.evaluate, inp.fen, [inp.uci])
             # A best move has no "refutation" — `_brief_move`'s refutation line is the flaw explanation
             # for a WRONG move; on the right move it reads as if the move were dubious (and VerdictPrompt
             # deliberately does NOT continue the line on a right answer). Drop it.
             verdict = {k: v for k, v in verdict.items() if k != "refutation_pv"}
-        move_read = _brief_move(verdict, hide_best=not correct)
-        positional = "\n".join(str(x) for x in getattr(grounding, "always", []) or [])
-        return move_read + (f"\n{positional}" if positional else "")
+            move_read = _brief_move(verdict, hide_best=False)
+            positional = "\n".join(str(x) for x in getattr(grounding, "always", []) or [])
+            return move_read + (f"\n{positional}" if positional else "")
+        # WRONG move — give it enough to explain the flaw properly, three grounded layers (the outcome
+        # alone read as "reduces your advantage" for a game-losing blunder):
+        #   1. `_brief_move` — the class, the eval SWING (winning→losing), the refutation line.
+        #   2. `_why_loses` — the INSTRUCTIVE mechanism (you walked a defender off / left a piece
+        #      hanging), derived deterministically from the board so it is grounded, not guessed.
+        #   3. the read of the position the move PRODUCED — the true eval + both sides' threats — not
+        #      the pre-move positional read, which said "winning" and made the model soften the blunder.
+        after = _after_fen(inp.fen, inp.uci)
+        verdict, after_read = await asyncio.gather(
+            asyncio.to_thread(self.ground.evaluate, inp.fen, [inp.uci]),
+            asyncio.to_thread(self.ground.analyze_and_show, after, focus="analysis", board_push=False)
+            if after else _none())
+        move_read = _brief_move(verdict, hide_best=True)
+        why = _why_loses(inp.fen, inp.uci, verdict.get("refutation_pv"))
+        after_txt = "\n".join(str(x) for x in ((after_read or {}).get("analysis") or []))
+        return "\n".join(p for p in (move_read, why, after_txt) if p)
 
     def _apply_board_effects(self, effects) -> None:
         """Move the board to reflect a move_line bit's advance — the player's move AND the walker's

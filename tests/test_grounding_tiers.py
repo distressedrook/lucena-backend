@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from lucena_backend.coaching.grounding import (
     TieredFacts, tiered_bit_grounding, _brief_move, _brief_reply, _pv_capture_victims, you_move_beat,
+    _swing_phrase, _why_loses,
 )
 
 # A move_line tree carrying a poisoned line, shaped exactly as preview_drill emits it.
@@ -191,6 +192,26 @@ def test_you_move_beat_carries_client_id_for_reconciliation():
     fen = "1k5r/4q3/1pp5/3bNp2/6p1/P5P1/1P3P2/3QRK2 w - - 0 1"
     assert you_move_beat(fen, "d1d5", "Qxd5", correct=True, client_id="nonce-1")["client_id"] == "nonce-1"
     assert "client_id" not in you_move_beat(fen, "d1d5", "Qxd5", correct=True), "absent when no nonce"
+
+
+def test_swing_phrase_bands_the_consequence():
+    assert _swing_phrase(19.7, 88.5) == "this move turns a winning position into a losing one for you"
+    assert _swing_phrase(86.0, 88.5) is None, "no band change → no swing to explain"
+    assert _swing_phrase(None, 88.5) is None
+
+
+def test_why_loses_names_the_abandoned_defender():
+    # After Nxe7 Rh1+, the White king on f1 is the ONLY defender of the rook on e1. Kg2 walks it off,
+    # so Rxe1 wins the rook — the instructive mechanism, derived from the board, not guessed.
+    why = _why_loses("8/1k2N3/1p6/3p1p2/6p1/P5P1/1P3P2/4RK1r w - - 1 4", "f1g2", ["Rxe1", "Nxf5"])
+    assert why is not None
+    assert "king you moved from f1" in why
+    assert "rook on e1" in why and "Rxe1" in why
+
+
+def test_why_loses_is_none_without_a_capture_refutation():
+    assert _why_loses("8/1k2N3/1p6/3p1p2/6p1/P5P1/1P3P2/4RK1r w - - 1 4", "f1g2", ["Kb7"]) is None
+    assert _why_loses(None, "f1g2", ["Rxe1"]) is None
 
 
 def test_brief_move_handles_error_and_empty():

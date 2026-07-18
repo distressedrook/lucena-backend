@@ -196,6 +196,68 @@ def _numbered_line(pv: list, fen: str | None, *, played_by_white: bool) -> list:
     return out
 
 
+def _win_band(wp: float) -> str:
+    """A win% (player POV) → a plain assessment word. Coarse on purpose: the coach voices the BAND,
+    never the number (reciting '19%' is not a coaching sentence, and the exact figure is noise)."""
+    return ("winning" if wp >= 65 else "better" if wp >= 55 else "equal"
+            if wp >= 45 else "worse" if wp >= 35 else "losing")
+
+
+def _swing_phrase(after_wp, best_wp) -> str | None:
+    """The move's CONSEQUENCE as a band-to-band swing, player POV — 'a winning position into a losing
+    one'. `after_wp` is this move's win%, `best_wp` what the best move held. The crux a wrong-move
+    refutation only implies: the numbers said losing while the static positional read still said
+    'winning', so the coach softened a blunder to 'reduces your advantage'. None when the band doesn't
+    change (no meaningful swing to explain)."""
+    if not isinstance(after_wp, (int, float)) or not isinstance(best_wp, (int, float)):
+        return None
+    a, b = _win_band(after_wp), _win_band(best_wp)
+    if a == b:
+        return None
+    return f"this move turns a {b} position into a {a} one for you"
+
+
+def _why_loses(pre_fen: str | None, uci: str | None, pv: list) -> str | None:
+    """Derive the INSTRUCTIVE reason a move drops material — the coaching point, not just the outcome.
+    The refutation says WHAT the opponent wins ('Rxe1 wins the rook'); this says WHY it is possible:
+    the move walked a defender off, or ignored an already-hanging piece. Deterministic, from the board's
+    own defender counts (`Board.defenders`), so it is grounded, not guessed — and it never names the
+    solution move. Returns a sentence or None (only material-winning capture refutations have this
+    shape). See the tactic-reason-derivation research note: this is the first concrete deriver."""
+    if not pre_fen or not uci or not pv:
+        return None
+    refute = pv[0]
+    if "x" not in refute:
+        return None                                   # only a capture refutation loses material this way
+    sq = refute.rstrip("+#")[-2:]
+    try:
+        from lucena_engine.board import Board
+        b = Board(pre_fen)
+        victim = next((p for p in b.piece_list() if p.square == sq), None)
+        if victim is None:
+            return None
+        vword = _PIECE_WORD.get(victim.piece.upper(), "pawn")
+        before = set(b.defenders(sq))                 # squares of the player's pieces guarding `sq`
+        after = b.apply(uci)
+        still = any(p.square == sq for p in after.piece_list())   # the victim didn't itself move
+        after_def = set(after.defenders(sq)) if still else set()
+        from_sq = uci[:2].lower()
+        moved = next((p for p in b.piece_list() if p.square == from_sq), None)
+        mword = _PIECE_WORD.get((moved.piece if moved else "").upper(), "piece") if moved else "piece"
+        if from_sq in before and from_sq not in after_def:
+            return (f"The {mword} you moved from {from_sq} was the ONLY thing defending your {vword} on "
+                    f"{sq}; moving it leaves the {vword} undefended, so {refute} wins it for free."
+                    if before == {from_sq} else
+                    f"The {mword} you moved from {from_sq} was defending your {vword} on {sq}; moving it "
+                    f"leaves the {vword} short of defenders, so {refute} wins it.")
+        if not before:
+            return (f"Your {vword} on {sq} was already undefended; this move does not deal with the "
+                    f"threat of {refute}, which wins it.")
+        return None
+    except Exception:
+        return None
+
+
 def _brief_move(v: dict, *, hide_best: bool = False) -> str:
     """Compact grounding for a played move — the engine's verdict on it. `hide_best` drops the solution
     move (used on a WRONG drill move, so the coach can't leak the answer while explaining the flaw)."""
@@ -206,6 +268,13 @@ def _brief_move(v: dict, *, hide_best: bool = False) -> str:
         out.append(f"It captures the {v['captured']}.")
     if v.get("class"):
         out.append(f"Engine class of this move: {v['class']}.")
+    # The eval CONSEQUENCE — the band-to-band swing from what the best move held to what THIS move
+    # gives (player POV). This is the crux a wrong-move refutation only implies; naming it stops the
+    # coach softening a blunder ("reduces your advantage") when the move is in fact losing. Bands only,
+    # no raw numbers, and the best move's SAN is never named — safe under hide_best.
+    if phrase := _swing_phrase((v.get("eval") or {}).get("win_pct"),
+                               ((v.get("best") or {}).get("eval") or {}).get("win_pct")):
+        out.append(phrase[0].upper() + phrase[1:] + ".")
     # The engine's own move-level facts ("bxc4 wins the bishop on c4", "Nxf6+ is strong for the
     # opponent") — the concrete WHY, previously dropped so the verdict had only class + refutation to
     # reason from. Gated on `not hide_best`: on a WRONG drill move a fact can NAME the solution move, so

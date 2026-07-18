@@ -151,11 +151,14 @@ class VerdictPrompt:
         "state the next move or continue the line; do NOT cite win% or centipawns."
     )
     _WRONG = (
-        "The player just played a move that is NOT the answer. In 1-2 short sentences, explain the flaw "
-        "— what it runs into — grounded ONLY in the facts, stay encouraging, and nudge them back toward "
-        "the idea WITHOUT naming the correct move. Point at the refuting move/line the facts give you "
-        "and describe the CONCRETE consequence it shows (the piece must retreat, material is lost, the "
-        "attack fizzles). Never reveal the solution."
+        "The player just played a move that is NOT the answer. In 2-3 short sentences, explain the flaw "
+        "grounded ONLY in the facts, stay encouraging, and nudge them back toward the idea WITHOUT "
+        "naming the correct move. Build the explanation in three beats: (1) the refuting move the facts "
+        "give you and the CONCRETE thing it does (captures a piece, gives check, forces a retreat); "
+        "(2) WHY that is possible — what the played move left undefended or failed to deal with; "
+        "(3) the RESULT — what the position BECOMES for the player, using the swing the facts state "
+        "(a winning position turned losing, or still fine but not the cleanest). Do not soften a move "
+        "the facts call losing into 'a small inaccuracy'. Never reveal the solution move."
     )
 
     @classmethod
