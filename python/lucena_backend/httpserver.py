@@ -136,7 +136,8 @@ def build_app(*, home: str, llm=None, model: str = _DEFAULT_MODEL,
                    else _Input(kind="text", text=text))
             await loop.handle_input(sid, inp)
         elif t == "move":
-            await loop.handle_input(sid, _Input(kind="move", uci=msg.get("uci"), fen=msg.get("fen")))
+            await loop.handle_input(sid, _Input(kind="move", uci=msg.get("uci"), fen=msg.get("fen"),
+                                                client_id=msg.get("client_id")))
         elif t == "position":                       # navigation: report the board being shown (NOT a turn)
             await asyncio.to_thread(store.set_board_view, msg.get("fen"))
         elif t == "view":
@@ -338,7 +339,8 @@ def build_app(*, home: str, llm=None, model: str = _DEFAULT_MODEL,
         except PermissionError:
             return _forbidden()
         move_result.set(None)
-        await loop.handle_input(sid, _Input(kind="move", uci=uci, fen=fen))
+        await loop.handle_input(sid, _Input(kind="move", uci=uci, fen=fen,
+                                            client_id=body.get("client_id")))
         return {"ok": True, **(move_result.get() or {"drill": False})}
 
     @app.post("/drill")

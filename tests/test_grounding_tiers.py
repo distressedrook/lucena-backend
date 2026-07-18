@@ -187,6 +187,12 @@ def test_you_move_beat_no_capture_no_badge():
     assert "correct" not in b, "no badge when correctness is unknown (freeform)"
 
 
+def test_you_move_beat_carries_client_id_for_reconciliation():
+    fen = "1k5r/4q3/1pp5/3bNp2/6p1/P5P1/1P3P2/3QRK2 w - - 0 1"
+    assert you_move_beat(fen, "d1d5", "Qxd5", correct=True, client_id="nonce-1")["client_id"] == "nonce-1"
+    assert "client_id" not in you_move_beat(fen, "d1d5", "Qxd5", correct=True), "absent when no nonce"
+
+
 def test_brief_move_handles_error_and_empty():
     assert _brief_move({"error": "x"}) == "(no move read available)"
     assert _brief_move({}).startswith("Move played:")

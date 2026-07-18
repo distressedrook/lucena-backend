@@ -95,7 +95,8 @@ class CoachHandler(HandlerBase):
         # the coach speaks — a board move never came through the turn path, so nothing else emits it.
         # Only for a board move; a typed free_text answer was already echoed by the turn handler.
         if inp.uci and inp.fen:
-            self.store.append_beats([you_move_beat(inp.fen, inp.uci, inp.san, correct=correct)])
+            self.store.append_beats([you_move_beat(inp.fen, inp.uci, inp.san, correct=correct,
+                                                   client_id=inp.client_id)])
 
         # Record the result for a synchronous caller (REST /move) BEFORE the slow why-wrong narration,
         # so the app gets {drill,correct,finished} promptly (the board already moved via the stream).

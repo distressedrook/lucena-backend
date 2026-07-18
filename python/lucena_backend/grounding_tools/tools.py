@@ -147,7 +147,7 @@ def _captured_piece(fen: str, uci: str) -> str | None:
 
 
 def _you_beat(text: str, *, correct: bool | None = None, move: str | None = None,
-              fen: str | None = None, notation: str | None = None) -> dict:
+              fen: str | None = None, notation: str | None = None, client_id: str | None = None) -> dict:
     """A player-turn beat — the player's own words (or 'Played <move>' for a board move) shown as a
     right-aligned bubble, so the beats column reads as a conversation, not a coach monologue. On a
     DRILL move, `correct` marks the bubble with a verdict badge (green check / red cross) instead of a
@@ -174,6 +174,8 @@ def _you_beat(text: str, *, correct: bool | None = None, move: str | None = None
         beat["fen"] = fen
     if notation:
         beat["notation"] = notation
+    if client_id:                       # reconcile against the app's optimistic move beat
+        beat["client_id"] = client_id
     return beat
 
 # Point-of-action reminder stamped on every "here's the position" result. A tool
@@ -2256,7 +2258,7 @@ class ToolContext:
 
     # -- play_move (app pushes a raw move; the MCP adjudicates) ------------
     @_guarded
-    def play_move(self, uci, fen=None, *, push_feedback=True) -> dict:
+    def play_move(self, uci, fen=None, *, push_feedback=True, client_id=None) -> dict:
         """The APP pushes a raw played move; the MCP adjudicates it against the active drill (or,
         with no drill, records it for the coach). Server-side it updates the board, pushes the
         deterministic feedback beat + the Maia-grounded move-meaning beat, and records the drill
@@ -2301,7 +2303,8 @@ class ToolContext:
                     self.store.append_beats([_you_beat(
                         f"Played {san}" + (f" — takes the {c}" if (c := _captured_piece(pre, uci)) else ""),
                         move=san, fen=after,
-                        notation=_pgn_line([{"san": san, "fen": after}]) or None)])
+                        notation=_pgn_line([{"san": san, "fen": after}]) or None,
+                        client_id=client_id)])
                     # History BEFORE board: the app anchors orientation on history.first, so writing the
                     # board first (a black-to-move position) would flip the board upside-down for a frame
                     # on the first move (empty history) before history corrects it.

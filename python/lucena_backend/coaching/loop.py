@@ -37,6 +37,8 @@ class Input:
     uci: str | None = None
     san: str | None = None          # attached server-side for move adjudication (app sends uci)
     fen: str | None = None
+    client_id: str | None = None    # the nonce the app rendered this move's "you" beat under, echoed
+                                    # back on the persisted beat so the app reconciles the two (optimistic)
 
 
 # -- handler outcomes (the loop-mediated seam) -----------------------------------------------

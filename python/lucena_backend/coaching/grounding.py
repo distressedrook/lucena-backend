@@ -267,7 +267,7 @@ def _brief_reply(from_fen: str | None, san: str | None) -> str:
 
 
 def you_move_beat(pre_fen: str | None, uci: str | None, san: str | None,
-                  *, correct: bool | None = None) -> dict:
+                  *, correct: bool | None = None, client_id: str | None = None) -> dict:
     """The player's own board move echoed as a right-aligned "you" bubble — "Played Qxd5 — takes the
     knight" — so the beats column reads as a conversation, not a coach monologue. On a DRILL move
     `correct` marks the bubble with a verdict badge (green check / red cross); `move` (SAN) + `fen`
@@ -290,6 +290,8 @@ def you_move_beat(pre_fen: str | None, uci: str | None, san: str | None,
         beat["move"] = san
     if after_fen:
         beat["fen"] = after_fen
+    if client_id:                       # reconcile against the app's optimistic bubble
+        beat["client_id"] = client_id
     return beat
 
 

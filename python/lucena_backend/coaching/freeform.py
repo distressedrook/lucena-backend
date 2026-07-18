@@ -60,7 +60,8 @@ class FreeformHandler(HandlerBase):
     async def _on_move(self, inp) -> Outcome:
         pre_fen = inp.fen or self.store.board_view
         # Apply the move (freeform: one ply, no reply, canned feedback suppressed).
-        await asyncio.to_thread(self.ctx.play_move, inp.uci, inp.fen, push_feedback=False)
+        await asyncio.to_thread(self.ctx.play_move, inp.uci, inp.fen, push_feedback=False,
+                                client_id=inp.client_id)
         fen = self.store.board_view
         # ROUTE FIRST, off a CHEAP class probe. Routing only needs the move's class (is it a swing?)
         # and its SAN — `assess_move` (~400ms) answers both. The full `evaluate` (2×1500ms) and the
