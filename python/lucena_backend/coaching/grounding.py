@@ -269,20 +269,48 @@ def _solution_moves(tree: dict | None) -> list[str]:
     return []
 
 
-def _deep_tactics(always_lines, solution_moves) -> str | None:
+def _legal_sans(fen: str | None) -> set[str] | None:
+    """The base SANs (trailing +/# stripped) legal in `fen`, or None if unavailable. Used to drop a
+    'threat' fact naming a move the just-played move has made impossible — e.g. 'Black threatens
+    Rxc3+' read from the PRE-move board, after the rook has already left c3."""
+    if not fen:
+        return None
+    try:
+        from lucena_engine.board import Board
+        b = Board(fen)
+        return {b.san(u).rstrip("+#") for u in b.legal_moves()}
+    except Exception:
+        return None
+
+
+def _deep_tactics(always_lines, solution_moves, live_fen=None) -> str | None:
     """The engine's OWN deep read of the position — the defensive resources and structural linchpins
     it already computes (the null-move 'ignore Rh1+ and you go from winning to losing', the defender
     'the pawn on c6 is the only defender of the bishop on d5') — MINUS the one clause that names the
     solution. The `combination` detector announces 'a forcing sequence starting with <answer>', which
     would spoil the puzzle, so any clause naming a solution move is dropped. This is how the coach
     explains WHY the position is subtle (the Rh1+ resource, the mutual-defence knot) without handing
-    over the move. None if there is no tactical line or nothing survives the strip."""
+    over the move. None if there is no tactical line or nothing survives the strip.
+
+    `live_fen` (optional): the position AFTER the move just played. When given, a clause whose named
+    move(s) are ALL illegal there is dropped as STALE — this read is grounded on the PRE-move board,
+    so on a wrong move that neutralises a threat (moving the attacked piece) it would otherwise cite a
+    threat that no longer exists ('deal with Rxc3+' after the rook left c3, contradicting the
+    refutation). A clause with no move (a structural fact) is always kept."""
+    legal = _legal_sans(live_fen)
     for line in (always_lines or []):
         if not str(line).startswith("Tactics:"):
             continue
         body = str(line)[len("Tactics:"):].strip().rstrip(".")
-        kept = [c.strip() for c in body.split(";")
-                if not any(m and m in c for m in solution_moves)]
+        kept = []
+        for c in (x.strip() for x in body.split(";")):
+            if any(m and m in c for m in solution_moves):
+                continue
+            if legal is not None:
+                toks = {t.rstrip("+#") for t in _move_tokens(c)}
+                if toks and not (toks & legal):   # every move it names is now illegal → stale threat
+                    continue
+            kept.append(c)
         if kept:
             return ("Key tactical features of the position — surface the one that explains why simple "
                     "tries fail (a defensive resource like a saving check, a mutually-defending pair): "

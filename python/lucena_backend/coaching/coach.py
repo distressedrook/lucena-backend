@@ -365,7 +365,7 @@ class CoachHandler(HandlerBase):
             return (await asyncio.to_thread(self.ground.analyze_and_show, fen,
                                             focus="analysis", board_push=False)) if fen else None
         pre, post = await asyncio.gather(_an(inp.fen), _an(after_fen))
-        deep = _deep_tactics((pre or {}).get("analysis") or [], sols)
+        pre_analysis = (pre or {}).get("analysis") or []
         created = _created_threat((post or {}).get("analysis") or [], sols)
         if correct:
             # A best move has no "refutation" — `_brief_move`'s refutation line is the flaw explanation
@@ -374,6 +374,9 @@ class CoachHandler(HandlerBase):
             verdict = {k: v for k, v in verdict.items() if k != "refutation_pv"}
             move_read = _brief_move(verdict, hide_best=False)
             positional = "\n".join(str(x) for x in getattr(grounding, "always", []) or [])
+            # Pre-move deep read, NOT stale-filtered: on the RIGHT move a pre-move threat the move
+            # neutralises is exactly the point ('this addresses the Rxc3+ that would have won the rook').
+            deep = _deep_tactics(pre_analysis, sols)
             return "\n".join(p for p in (move_read, created, positional or None, deep) if p)
         # WRONG move — give it enough to explain the flaw properly, all PLAYER-anchored (the outcome
         # alone read as "reduces your advantage" for a game-losing blunder): the class + eval SWING +
@@ -385,6 +388,11 @@ class CoachHandler(HandlerBase):
         # precedence over the material mechanism when it applies; both are deterministic, never guessed.
         why = (_draws_by_stalemate(inp.fen, inp.uci, verdict.get("refutation_pv"))
                or _why_loses(inp.fen, inp.uci, verdict.get("refutation_pv")))
+        # Pre-move deep read, STALE-FILTERED against the after-move board: a wrong move can neutralise a
+        # pre-move threat (moving the attacked piece) while failing for another reason — without the
+        # filter the 'what to deal with' beat cited a threat the move made impossible ('deal with Rxc3+'
+        # after Rc4 left c3 empty, contradicting the refutation).
+        deep = _deep_tactics(pre_analysis, sols, live_fen=after_fen)
         return "\n".join(p for p in (move_read, created, why, deep) if p)
 
     @staticmethod

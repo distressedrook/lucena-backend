@@ -249,6 +249,21 @@ def test_deep_tactics_none_without_a_tactics_line():
     assert _deep_tactics(["White is winning."], ["Qxd5"]) is None
 
 
+def test_deep_tactics_drops_a_threat_the_move_made_impossible():
+    # The FIX beat is grounded on the PRE-move board, so a wrong move that MOVES the attacked piece
+    # (Rc3->c4) leaves it citing 'deal with Rxc3+' — a threat now impossible. With live_fen (the
+    # after-move board, Black to move), a clause whose every move is illegal there is dropped as stale.
+    facts = ["Tactics: Black threatens Rxc3+, winning White's rook on c3."]
+    after_rc4 = "k7/2K5/1P6/8/2R4p/1r5p/7P/8 b - - 1 7"   # c3 empty → Rxc3+ illegal
+    assert _deep_tactics(facts, [], live_fen=after_rc4) is None, "stale threat must be dropped"
+    # Same fact, but grounded WITHOUT a live board (the right-move framing 'what this move addresses')
+    # — the clause is kept.
+    assert "Rxc3+" in (_deep_tactics(facts, []) or ""), "pre-move framing keeps the clause"
+    # A structural clause naming no move survives the live filter (it isn't a move-threat).
+    struct = ["Tactics: the pawn on c6 is the only defender of the bishop on d5."]
+    assert "only defender" in (_deep_tactics(struct, [], live_fen=after_rc4) or "")
+
+
 def test_deep_tactics_keeps_mate_claims_when_correctly_grounded():
     # Mate claims are NOT dropped — they're genuinely useful; the fix for the mis-sided 'Ra4#' is to
     # ground on the PRE-move position (player's turn) so the perspective is right, not to censor mates.

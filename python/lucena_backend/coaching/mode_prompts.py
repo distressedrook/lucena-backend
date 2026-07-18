@@ -169,7 +169,7 @@ class VerdictPrompt:
     )
     _WRONG = (
         "The player just played a move that is NOT the answer. Grounded ONLY in the facts, staying "
-        "encouraging and NEVER naming the correct move, respond in TWO parts:\n"
+        "encouraging and WITHOUT naming the correct move, respond in TWO parts:\n"
         "FIRST — ONE lead sentence (no bullet): name the move and its consequence — what it does to the "
         "position, using the swing the facts state (a winning position turned drawn or losing). One "
         "line. Do not soften a move the facts call losing into 'a small inaccuracy'.\n"
@@ -179,9 +179,9 @@ class VerdictPrompt:
         "bullets:\n"
         "- THE IDEA — ONLY if the facts literally credit the move's idea ('would fork the king and the "
         "queen — the right idea'), acknowledge it warmly. If the facts do NOT credit an idea, SKIP this "
-        "bullet: do not guess what the player intended or where the piece was heading ('toward the "
-        "center', 'an ambitious try') — none of that is in the facts, and inventing it is a grounding "
-        "error.\n"
+        "beat entirely: do not guess what the player intended or where the piece was heading ('moving "
+        "toward the centre', 'an ambitious try') — none of that is in the facts, and inventing it is a "
+        "grounding error.\n"
         "- THE REFUTATION — the refuting move the facts name and the CONCRETE thing it does. If the "
         "facts say the move CREATES A THREAT ('creates this threat: White threatens mate: Ra4#'), credit "
         "it FIRST in the clause — the move is not senseless, it really does threaten that — then how the "
