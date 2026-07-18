@@ -266,6 +266,33 @@ def _brief_reply(from_fen: str | None, san: str | None) -> str:
     return "\n".join(lines)
 
 
+def you_move_beat(pre_fen: str | None, uci: str | None, san: str | None,
+                  *, correct: bool | None = None) -> dict:
+    """The player's own board move echoed as a right-aligned "you" bubble — "Played Qxd5 — takes the
+    knight" — so the beats column reads as a conversation, not a coach monologue. On a DRILL move
+    `correct` marks the bubble with a verdict badge (green check / red cross); `move` (SAN) + `fen`
+    (the position right after the move) make it a clickable chip. Restores the beat the legacy
+    play_move emitted: the new coach spine adjudicates through the walker, so it must emit it here.
+    Captured piece + after-move FEN are resolved on a board — never guessed."""
+    after_fen = None
+    if pre_fen and uci:
+        try:
+            from lucena_engine.board import Board
+            after_fen = Board(pre_fen).apply(uci).fen
+        except Exception:
+            after_fen = None
+    captured = _pv_capture_victims(pre_fen, None, [san])[0] if (pre_fen and san) else None
+    text = f"Played {san or uci}" + (f" — takes the {captured}" if captured else "")
+    beat: dict = {"kind": "you", "stops": False, "segments": [{"text": text}]}
+    if correct is not None:
+        beat["correct"] = bool(correct)
+    if san:
+        beat["move"] = san
+    if after_fen:
+        beat["fen"] = after_fen
+    return beat
+
+
 def _brief(resp: dict) -> str:
     """The grounded briefing to hand the model — the NL analysis lines ToolContext already produced
     (assemble_analysis), plus best move / poisoned-line note when present. Never a raw JSON dump."""

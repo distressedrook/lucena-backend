@@ -10,7 +10,7 @@ solve-time text and ARE in the reveal-time text.
 from __future__ import annotations
 
 from lucena_backend.coaching.grounding import (
-    TieredFacts, tiered_bit_grounding, _brief_move, _brief_reply, _pv_capture_victims,
+    TieredFacts, tiered_bit_grounding, _brief_move, _brief_reply, _pv_capture_victims, you_move_beat,
 )
 
 # A move_line tree carrying a poisoned line, shaped exactly as preview_drill emits it.
@@ -169,6 +169,22 @@ def test_brief_reply_flags_check_and_degrades():
     assert "gives check" in _brief_reply("8/8/8/8/8/8/5k2/4R1K1 w - - 0 1", "Re2+")
     assert _brief_reply(None, "cxd5") == "(no reply read available)"
     assert _brief_reply("x", None) == "(no reply read available)"
+
+
+def test_you_move_beat_carries_badge_chip_and_capture():
+    # White sacrifices the queen: Qxd5 takes the bishop. The bubble names the capture, carries the
+    # verdict badge, the SAN chip, and the after-move FEN to snap to.
+    b = you_move_beat("1k5r/4q3/1pp5/3bNp2/6p1/P5P1/1P3P2/3QRK2 w - - 0 1", "d1d5", "Qxd5", correct=True)
+    assert b["kind"] == "you"
+    assert b["segments"][0]["text"] == "Played Qxd5 — takes the bishop"
+    assert b["correct"] is True and b["move"] == "Qxd5"
+    assert b["fen"].split()[1] == "b", "the after-move FEN is Black to move"
+
+
+def test_you_move_beat_no_capture_no_badge():
+    b = you_move_beat("8/8/8/8/8/8/5k2/4RK2 w - - 0 1", "e1e2", "Re2", correct=None)
+    assert b["segments"][0]["text"] == "Played Re2"
+    assert "correct" not in b, "no badge when correctness is unknown (freeform)"
 
 
 def test_brief_move_handles_error_and_empty():

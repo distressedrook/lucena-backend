@@ -12,7 +12,7 @@ import asyncio
 import contextvars
 
 from .bits import BitProgress
-from .grounding import _brief_move, _brief_reply, tiered_bit_grounding
+from .grounding import _brief_move, _brief_reply, tiered_bit_grounding, you_move_beat
 from .handler_base import HandlerBase
 from .lesson import ACTIVE, LessonProgress, puzzle_lesson_id, puzzle_spec
 from .loop import Handled, Open, Outcome, Suspend
@@ -90,6 +90,12 @@ class CoachHandler(HandlerBase):
         lesson.set_bit_progress(bit.index, new_prog)
         self.store.save_lesson_progress(lesson.progress)
         self._apply_board_effects(effects)                          # move + auto-played opponent reply
+
+        # Echo the player's OWN move as a "you played" bubble (verdict badge + clickable chip) before
+        # the coach speaks — a board move never came through the turn path, so nothing else emits it.
+        # Only for a board move; a typed free_text answer was already echoed by the turn handler.
+        if inp.uci and inp.fen:
+            self.store.append_beats([you_move_beat(inp.fen, inp.uci, inp.san, correct=correct)])
 
         # Record the result for a synchronous caller (REST /move) BEFORE the slow why-wrong narration,
         # so the app gets {drill,correct,finished} promptly (the board already moved via the stream).

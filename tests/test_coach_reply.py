@@ -81,17 +81,21 @@ def _texts(store):
     return ["".join(s["text"] for s in b["segments"]) for b in store.beats]
 
 
-def test_correct_midline_move_pushes_verdict_then_reply():
+FEN = "1k5r/4q3/1pp5/3bNp2/6p1/P5P1/1P3P2/3QRK2 w - - 0 1"
+
+
+def test_correct_midline_move_echoes_you_then_verdict_then_reply():
     store = _Store(_lesson())
     h = _handler(store, REPLY)
-    inp = Input(kind="move", uci="d8d5", san="Qxd5", fen="1k5r/4q3/1pp5/3bNp2/6p1/P5P1/1P3P2/3QRK2 w - - 0 1")
-    asyncio.run(h.handle(inp))
-    assert _texts(store) == ["VERDICT", "REPLY:cxd5"], "a correct mid-line move must voice BOTH beats, in order"
+    asyncio.run(h.handle(Input(kind="move", uci="d1d5", san="Qxd5", fen=FEN)))
+    # (1) the player's own move as a "you played" bubble, (2) the verdict, (3) the opponent's reply.
+    assert _texts(store) == ["Played Qxd5 — takes the bishop", "VERDICT", "REPLY:cxd5"]
+    you = store.beats[0]
+    assert you["kind"] == "you" and you["correct"] is True and you["move"] == "Qxd5"
 
 
-def test_no_reply_means_a_single_verdict_beat():
+def test_no_reply_still_echoes_the_move_then_the_verdict():
     store = _Store(_lesson())
     h = _handler(store, None)          # walker returned no reply (line ended / wrong move)
-    inp = Input(kind="move", uci="d8d5", san="Qxd5", fen="1k5r/4q3/1pp5/3bNp2/6p1/P5P1/1P3P2/3QRK2 w - - 0 1")
-    asyncio.run(h.handle(inp))
-    assert _texts(store) == ["VERDICT"], "with no reply, only the verdict is voiced"
+    asyncio.run(h.handle(Input(kind="move", uci="d1d5", san="Qxd5", fen=FEN)))
+    assert _texts(store) == ["Played Qxd5 — takes the bishop", "VERDICT"]
