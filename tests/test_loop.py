@@ -23,6 +23,7 @@ from lucena_backend.coaching import lesson as _lesson
 class FakeStore:
     def __init__(self):
         self.active = None                 # the "active lesson" resolve_mode keys on
+        self.suspended = None              # a parked drill a move can resume
         self.status_calls = []             # every publish_status(text)
         self.state_changes = []            # every set_lesson_state(id, state)
 
@@ -36,8 +37,13 @@ class FakeStore:
     def active_lesson(self):
         return self.active
 
+    def suspended_lesson(self):
+        return self.suspended
+
     def set_lesson_state(self, lesson_id, state):
         self.state_changes.append((lesson_id, state))
+        if state == "active" and self.suspended is not None:   # mimic resume: suspended → active
+            self.active, self.suspended = self.suspended, None
 
 
 class _Lesson:
@@ -77,6 +83,26 @@ def _run(store, freeform, coach, inp):
 def test_no_lesson_routes_to_freeform():
     s = FakeStore(); ff = FakeHandler(); co = FakeCoach(store=s)
     _run(s, ff, co, Input(kind="text", text="hi"))
+    assert len(ff.seen) == 1 and len(co.seen) == 0
+
+
+def test_a_move_resumes_a_suspended_drill_and_routes_to_coach():
+    # A what-if suspended the drill; the player then plays a real move. It must resume the drill and be
+    # adjudicated by coach — not fall through to freeform (the "broken state": the solution was narrated
+    # instead of scored).
+    s = FakeStore(); s.suspended = _Lesson()          # parked drill, nothing active
+    ff = FakeHandler(); co = FakeCoach(store=s)
+    _run(s, ff, co, Input(kind="move", uci="d1d5"))
+    assert ("L1", "active") in s.state_changes, "the move must resume the suspended drill"
+    assert len(co.seen) == 1 and len(ff.seen) == 0, "the move is adjudicated by coach, not freeform"
+
+
+def test_a_text_turn_does_not_resume_a_suspended_drill():
+    # Only a move signals 'back to solving'; a further text turn stays in the freeform excursion.
+    s = FakeStore(); s.suspended = _Lesson()
+    ff = FakeHandler(); co = FakeCoach(store=s)
+    _run(s, ff, co, Input(kind="text", text="tell me more"))
+    assert s.state_changes == [], "a text turn must not resume the drill"
     assert len(ff.seen) == 1 and len(co.seen) == 0
 
 

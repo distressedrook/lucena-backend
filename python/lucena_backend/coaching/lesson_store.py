@@ -89,6 +89,16 @@ class LessonStore:
                 return _progress_from_dict(d)
         return None
 
+    def suspended(self, user_id: str | None, chat_id: str | None) -> LessonProgress | None:
+        """The SUSPENDED lesson for THIS CHAT — a drill parked by a what-if excursion. `set_state`
+        keeps chat_id, so a suspension stays bound to its chat and can be resumed when the player plays
+        a move (back to solving). Same shape as `active`, state==suspended."""
+        for d in self._load_raw(user_id).values():
+            if (d.get("state") == SUSPENDED and d.get("meta") is None
+                    and d.get("chat_id") == chat_id):
+                return _progress_from_dict(d)
+        return None
+
     def open_items(self, user_id: str | None) -> list[LessonProgress]:
         """Resumable items for 'pick up an open item' — `state == open AND meta is None`."""
         return [_progress_from_dict(d) for d in self._load_raw(user_id).values()

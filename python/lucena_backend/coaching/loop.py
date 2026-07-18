@@ -94,9 +94,22 @@ class ConversationLoop:
             # routing call is not expected to produce a beat; the turn as a whole is.
             self.store.publish_status("Thinking…")
             try:
+                self._maybe_resume_for_move(inp)
                 await self._route(inp)
             finally:
                 self.store.publish_status(None)
+
+    def _maybe_resume_for_move(self, inp: Input) -> None:
+        """A MOVE while a drill is SUSPENDED (parked by a what-if excursion) means the player is back
+        to solving — resume it so the move is adjudicated by the drill, not eaten by freeform. Without
+        this a what-if stranded the lesson in `suspended` forever: `active_lesson()` returned None, the
+        loop stayed in freeform, and the real solution move was narrated instead of scored (the state
+        the player 'broke'). Only a move resumes; a further text turn stays in the freeform excursion."""
+        if inp.kind != "move" or self.store.active_lesson() is not None:
+            return
+        susp = self.store.suspended_lesson()
+        if susp is not None:
+            self.store.set_lesson_state(susp.spec.id, _lesson.ACTIVE)
 
     async def _route(self, inp: Input, *, rerouted: bool = False) -> None:
         handler = self.coach if self._resolve_mode() is Mode.COACH else self.freeform

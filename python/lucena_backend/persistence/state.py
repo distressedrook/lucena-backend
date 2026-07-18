@@ -392,6 +392,11 @@ class StateStore:
         here. None → freeform. Paired with its library spec; a dangling progress reads None."""
         return self._pair(self._lesson_store.active(self.current_user, self.current_sid))
 
+    def suspended_lesson(self):
+        """The SUSPENDED drill for this chat (parked by a what-if), paired to its spec — so a move can
+        resume it. None → nothing to resume."""
+        return self._pair(self._lesson_store.suspended(self.current_user, self.current_sid))
+
     def activate_lesson(self, lesson_id: str) -> None:
         """Bind a lesson active to the CURRENT chat (coach entry)."""
         self._lesson_store.activate(self.current_user, lesson_id, self.current_sid)
