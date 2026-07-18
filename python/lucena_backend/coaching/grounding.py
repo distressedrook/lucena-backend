@@ -167,10 +167,13 @@ def _brief_move(v: dict, *, hide_best: bool = False) -> str:
         # Numbered here rather than handed over bare: see `_numbered_line` — reciting an unlabeled
         # PV is move-number arithmetic, and that arithmetic is exactly what was going wrong.
         numbered = _numbered_line(pv[:6], v.get("fen"), played_by_white=v.get("side_to_move") == "white")
+        # The refutation is the OPPONENT's line: it opens with their punishing move, then alternates
+        # (opponent, you, opponent, …). Label every move's side explicitly — the bare mixed line let
+        # the model flip who's who (a live wrong-verdict read the opponent's move as the player's).
+        labeled = " ".join(f"({'opponent' if i % 2 == 0 else 'you'}) {m}" for i, m in enumerate(numbered))
         out.append(f"The opponent refutes it with {numbered[0] if numbered else first} "
-                   f"({_move_phrase(first)}); the line then runs "
-                   f"{' '.join(numbered)}. Explain the flaw ONLY through this line — the refuting move is "
-                   f"{first}, a {piece} move, nothing else.")
+                   f"({_move_phrase(first)}); the line then runs {labeled}. Explain the flaw ONLY through "
+                   f"this line — the refuting move is the opponent's {first}, a {piece} move, nothing else.")
     return "\n".join(out)
 
 

@@ -114,6 +114,17 @@ def test_brief_move_wrong_hides_the_solution():
     assert "Qe3" in s
 
 
+def test_brief_move_labels_each_side_in_the_refutation():
+    # The refutation opens with the OPPONENT's punishing move then alternates; without explicit
+    # side labels the model flipped who's who (a live wrong-verdict cast the opponent's move as
+    # the player's). Every move in the line must be tagged (opponent)/(you), opponent first.
+    # side_to_move is black here, so the opponent is White: 2. Qe3 (no dots), player replies 2... Nef6.
+    s = _brief_move(WRONG_EVAL, hide_best=True)
+    assert "(opponent) 2. Qe3" in s, "the refuting move must be attributed to the opponent"
+    assert "(you) 2... Nef6" in s, "the reply must be attributed to the player"
+    assert "the refuting move is the opponent's Qe3" in s
+
+
 def test_brief_move_never_capitalises_a_move_token():
     # 'bxc4' (pawn) must not become 'Bxc4' (bishop) — the first-letter slip we fixed in the trap voice.
     s = _brief_move(RIGHT_EVAL, hide_best=False)
