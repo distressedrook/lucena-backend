@@ -25,6 +25,9 @@ class FakeGround:
         self.calls.append((fen, tuple(ucis)))
         return self._evals[ucis[0]]
 
+    def analyze_and_show(self, fen, **kw):
+        return {"analysis": []}          # deep-tactics grounds on inp.fen via this; empty is fine here
+
 
 def _handler(ground):
     # store/llm/ctx aren't touched by _move_facts; pass inert stand-ins.

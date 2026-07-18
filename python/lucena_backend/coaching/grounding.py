@@ -100,9 +100,11 @@ def _perspective(freeform: bool, player_color: str | None = None) -> str:
             f"'{you_num}' (e.g. '5. Nf3' is White, '5... Nf3' is Black); your OPPONENT is {opp}, whose "
             f"moves are written '{opp_num}'. You have ALREADY made your move, so the board now shows "
             f"your OPPONENT to move — do NOT infer your colour from whose turn it is; you are {c}, "
-            f"period. Every threat, attack, or plan by {opp} belongs to the OPPONENT — never say you "
-            f"are threatening your own pieces or defending against yourself. When a line labels a move "
-            f"'(you)' or '(opponent)', trust that label exactly and never swap the two.\n"
+            f"period. The facts below name sides by their absolute COLOUR, never 'you'/'opponent': "
+            f"'{c}' is you, '{opp}' is your opponent. So a fact reading '{opp} threatens …' is your "
+            f"OPPONENT's threat, and '{c} …' is yours — map the colour to the right person and never "
+            f"swap them. Every threat, attack, or plan by {opp} belongs to the OPPONENT — never say "
+            f"you are threatening your own pieces or defending against yourself.\n"
         )
     return (
         "PERSPECTIVE (critical — getting it backwards ruins the read): address the player as 'you'; "
@@ -113,6 +115,14 @@ def _perspective(freeform: bool, player_color: str | None = None) -> str:
 
 
 _PIECE_WORD = {"K": "king", "Q": "queen", "R": "rook", "B": "bishop", "N": "knight"}
+
+
+def _stm_color(fen: str | None) -> str:
+    """The side to move in `fen`, as an absolute colour ('White'/'Black'). Facts use colours, never
+    relative 'you'/'the opponent' — relative words invert with side-to-move and flip who a threat
+    belongs to; the PERSPECTIVE anchor maps the player's colour onto 'you' for the reader."""
+    parts = (fen or "").split()
+    return "Black" if len(parts) > 1 and parts[1] == "b" else "White"
 
 
 def _move_phrase(san: str) -> str:
@@ -269,14 +279,8 @@ def _deep_tactics(always_lines, solution_moves) -> str | None:
         if not str(line).startswith("Tactics:"):
             continue
         body = str(line)[len("Tactics:"):].strip().rstrip(".")
-        # Drop clauses that name the solution AND clauses claiming a MATE. The null-move 'threatens
-        # mate: X' / 'mate in N' claims are unreliable here — they surface only under the warm live
-        # engine, and on a DRAWN/equal result there is no forced mate at all, so they hand the coach a
-        # phantom ('the opponent threatens mate: Ra4#' on a dead-drawn rook ending). The useful deep
-        # facts — defensive resources ('go from winning to losing'), mutually-defending pairs — carry
-        # no 'mate' word, so this keeps them.
         kept = [c.strip() for c in body.split(";")
-                if not any(m and m in c for m in solution_moves) and "mate" not in c.lower()]
+                if not any(m and m in c for m in solution_moves)]
         if kept:
             return ("Key tactical features of the position — surface the one that explains why simple "
                     "tries fail (a defensive resource like a saving check, a mutually-defending pair): "
@@ -338,7 +342,7 @@ def _draws_by_stalemate(pre_fen: str | None, uci: str | None, pv: list) -> str |
 
 
 def _stalemate_sentence(pre_fen: str | None, sans: list, color: str) -> str:
-    c = (color or "the opponent").capitalize()
+    c = (color or "the defending side").capitalize()   # color is always b.side_to_move in practice
     return (f"This move only DRAWS by STALEMATE: after {_number_full_line(pre_fen, sans)}, {c} has NO "
             f"legal move and is not in check — that is stalemate, a draw. Every one of {c}'s pieces is "
             f"stuck, so once the material comes off there is nothing left to move. To WIN you must leave "
@@ -494,18 +498,22 @@ def _brief_move(v: dict, *, hide_best: bool = False) -> str:
         # Name what each capture TAKES — resolved on a board, not left for the model to guess (it
         # invented the piece on the captured square: called a rook a 'knight').
         victims = _pv_capture_victims(v.get("fen"), v.get("san"), pv[:6])
-        # The refutation is the OPPONENT's line: it opens with their punishing move, then alternates
-        # (opponent, you, opponent, …). Label every move's side explicitly — the bare mixed line let
-        # the model flip who's who (a live wrong-verdict read the opponent's move as the player's).
+        # The refutation opens with the reply to the just-played move, then alternates sides. Label
+        # every move's side with its absolute COLOUR — the bare mixed line let the model flip who's
+        # who, and relative 'you'/'opponent' labels inverted when the perspective moved. player_col
+        # is the side that just moved (side_to_move of the pre-move fen); the refutation starts with
+        # the other colour.
+        player_col = _stm_color(v.get("fen"))
+        replier_col = "White" if player_col == "Black" else "Black"
         labeled = " ".join(
-            f"({'opponent' if i % 2 == 0 else 'you'}) {m}"
+            f"({replier_col if i % 2 == 0 else player_col}) {m}"
             + (f" [takes the {victims[i]}]" if i < len(victims) and victims[i] else "")
             for i, m in enumerate(numbered))
         dest = first.rstrip("+#")[-2:]
         phrase = f"a {piece} captures the {victims[0]} on {dest}" if victims and victims[0] \
             else _move_phrase(first)
         last = numbered[-1] if numbered else first
-        out.append(f"The opponent refutes it with {numbered[0] if numbered else first} "
+        out.append(f"{replier_col} refutes it with {numbered[0] if numbered else first} "
                    f"({phrase}). The refutation line is EXACTLY these {len(numbered)} move(s) and no "
                    f"more: {labeled}. It ENDS at {last}. Explain the flaw using ONLY these moves — you "
                    f"may describe what they achieve (a piece won, a trade forced, a position reached), "
@@ -526,9 +534,11 @@ def _brief_reply(from_fen: str | None, san: str | None) -> str:
     piece = _PIECE_WORD.get(san.rstrip("+#")[:1], "pawn")
     dest = san.rstrip("+#")[-2:]
     victim = _pv_capture_victims(from_fen, None, [san])[0]
-    lines = [f"The opponent (the side NOT the player) has just replied with {numbered}."]
+    mover_col = _stm_color(from_fen)                       # the side that played this reply
+    victim_col = "White" if mover_col == "Black" else "Black"
+    lines = [f"{mover_col} has just replied with {numbered}."]
     if victim:
-        lines.append(f"It is a {piece} that captures the player's {victim} on {dest}.")
+        lines.append(f"It is a {piece} that captures {victim_col}'s {victim} on {dest}.")
     else:
         lines.append(f"It is a {piece} moving to {dest} (no capture).")
     if san.endswith("#"):

@@ -116,14 +116,16 @@ def test_brief_move_wrong_hides_the_solution():
 
 
 def test_brief_move_labels_each_side_in_the_refutation():
-    # The refutation opens with the OPPONENT's punishing move then alternates; without explicit
-    # side labels the model flipped who's who (a live wrong-verdict cast the opponent's move as
-    # the player's). Every move in the line must be tagged (opponent)/(you), opponent first.
-    # side_to_move is black here, so the opponent is White: 2. Qe3 (no dots), player replies 2... Nef6.
+    # The refutation opens with the replying side's punishing move then alternates; without explicit
+    # side labels the model flipped who's who (a live wrong-verdict cast the reply as the player's).
+    # Labels are ABSOLUTE COLOURS, never relative you/opponent (which invert with perspective).
+    # side_to_move is black here, so the player is Black and the replier is White: 2. Qe3 (no dots),
+    # Black replies 2... Nef6.
     s = _brief_move(WRONG_EVAL, hide_best=True)
-    assert "(opponent) 2. Qe3" in s, "the refuting move must be attributed to the opponent"
-    assert "(you) 2... Nef6" in s, "the reply must be attributed to the player"
-    assert "The opponent refutes it with 2. Qe3" in s
+    assert "(White) 2. Qe3" in s, "the refuting move must be attributed to White by colour"
+    assert "(Black) 2... Nef6" in s, "the reply must be attributed to Black by colour"
+    assert "White refutes it with 2. Qe3" in s
+    assert "opponent" not in s and "(you)" not in s, "facts must use colours, not relative words"
     assert "EXACTLY these 2 move(s)" in s and "ENDS at 2... Nef6" in s, "the line must be hard-bounded"
 
 
@@ -159,12 +161,14 @@ def test_brief_move_wrong_names_the_captured_piece_not_a_guess():
 
 
 def test_brief_reply_grounds_the_opponent_reply():
-    # The recapture 1... cxd5 (Black) takes the queen the player just sacrificed on d5.
+    # The recapture 1... cxd5 (Black) takes White's queen that stood on d5. The reply is attributed
+    # by COLOUR (Black moved; the victim is White's), never by relative you/opponent.
     from_fen = "1k5r/4q3/1pp5/3QNp2/6p1/P5P1/1P3P2/4RK2 b - - 0 1"
     s = _brief_reply(from_fen, "cxd5")
     assert "1... cxd5" in s, "the reply must be numbered as Black's"
-    assert "captures the player's queen on d5" in s, "the victim must be resolved, not guessed"
-    assert "opponent" in s.lower()
+    assert "Black has just replied" in s, "the mover is named by colour"
+    assert "captures White's queen on d5" in s, "the victim must be resolved and colour-attributed"
+    assert "opponent" not in s.lower(), "facts must use colours, not the relative word 'opponent'"
 
 
 def test_brief_reply_flags_check_and_degrades():
@@ -245,18 +249,13 @@ def test_deep_tactics_none_without_a_tactics_line():
     assert _deep_tactics(["White is winning."], ["Qxd5"]) is None
 
 
-def test_deep_tactics_drops_phantom_mate_claims():
-    # A null-move 'threatens mate: Ra4#' surfaces only under the warm live engine and is a phantom on a
-    # drawn/equal result — it handed the coach 'the opponent threatens mate: Ra4#' on a dead-drawn rook
-    # ending. Drop any 'mate' clause; keep the real, non-mate threat.
-    always = ["Tactics: the opponent threatens mate: Ra4#; "
+def test_deep_tactics_keeps_mate_claims_when_correctly_grounded():
+    # Mate claims are NOT dropped — they're genuinely useful; the fix for the mis-sided 'Ra4#' is to
+    # ground on the PRE-move position (player's turn) so the perspective is right, not to censor mates.
+    always = ["Tactics: the opponent threatens mate in 13 — it starts with Rxc3+; "
               "Black threatens Rxc3+, winning White's rook on c3."]
     out = _deep_tactics(always, [])
-    assert out is not None
-    assert "Ra4#" not in out and "mate" not in out, "phantom mate claim must be dropped"
-    assert "Rxc3+" in out, "the real threat must survive"
-    # a mate-only tactics line collapses to nothing
-    assert _deep_tactics(["Tactics: the opponent threatens mate in 13 — it starts with Rxc3+."], []) is None
+    assert out is not None and "mate in 13" in out and "Rxc3+" in out
 
 
 def test_solution_moves_from_the_tree_root():

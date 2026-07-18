@@ -372,12 +372,18 @@ class CoachHandler(HandlerBase):
         # precedence over the material mechanism when it applies; both are deterministic, never guessed.
         why = (_draws_by_stalemate(inp.fen, inp.uci, verdict.get("refutation_pv"))
                or _why_loses(inp.fen, inp.uci, verdict.get("refutation_pv")))
-        # The engine's OWN deep read of the position — the defensive resources (a killer check like
-        # Rh1+) and structural linchpins (the c6-pawn/d5-bishop mutual defence) it already computes —
-        # with the solution move stripped. This is how the coach can "see this far": explain why the
-        # naive tries fail and what the real knot is, without handing over the answer.
+        # The engine's OWN deep read — defensive resources (a killer check like Rh1+), structural
+        # linchpins (the c6/d5 mutual defence) — solution stripped. Grounded on inp.fen (the PRE-move
+        # position), NOT `grounding.always`: the latter reads the session board_view, which the app's
+        # optimistic move can already have advanced to the AFTER-move position. That position is the
+        # OPPONENT's turn, so its facts are perspective-inverted — the null-move fact "the opponent
+        # threatens mate: Ra4#" is really WHITE (the player) threatening, and the player-anchored
+        # verdict then flips it onto Black. inp.fen is the player's turn, so its "the opponent" == the
+        # verdict's opponent — consistent.
         tree = (bit.spec.params or {}).get("tree") if (bit and getattr(bit, "spec", None)) else None
-        deep = _deep_tactics(getattr(grounding, "always", []), _solution_moves(tree))
+        pre = await asyncio.to_thread(self.ground.analyze_and_show, inp.fen,
+                                      focus="analysis", board_push=False)
+        deep = _deep_tactics((pre or {}).get("analysis") or [], _solution_moves(tree))
         return "\n".join(p for p in (move_read, why, deep) if p)
 
     def _apply_board_effects(self, effects) -> None:
