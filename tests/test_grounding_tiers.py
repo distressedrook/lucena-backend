@@ -245,6 +245,20 @@ def test_deep_tactics_none_without_a_tactics_line():
     assert _deep_tactics(["White is winning."], ["Qxd5"]) is None
 
 
+def test_deep_tactics_drops_phantom_mate_claims():
+    # A null-move 'threatens mate: Ra4#' surfaces only under the warm live engine and is a phantom on a
+    # drawn/equal result — it handed the coach 'the opponent threatens mate: Ra4#' on a dead-drawn rook
+    # ending. Drop any 'mate' clause; keep the real, non-mate threat.
+    always = ["Tactics: the opponent threatens mate: Ra4#; "
+              "Black threatens Rxc3+, winning White's rook on c3."]
+    out = _deep_tactics(always, [])
+    assert out is not None
+    assert "Ra4#" not in out and "mate" not in out, "phantom mate claim must be dropped"
+    assert "Rxc3+" in out, "the real threat must survive"
+    # a mate-only tactics line collapses to nothing
+    assert _deep_tactics(["Tactics: the opponent threatens mate in 13 — it starts with Rxc3+."], []) is None
+
+
 def test_solution_moves_from_the_tree_root():
     assert _solution_moves({"root": {"kind": "solve", "expect_san": "Qxd5"}}) == ["Qxd5"]
     assert _solution_moves({"root": {"kind": "mate", "options": [{"san": "Qh7#"}, {"san": "Qb8#"}]}}) \

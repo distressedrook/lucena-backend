@@ -269,8 +269,14 @@ def _deep_tactics(always_lines, solution_moves) -> str | None:
         if not str(line).startswith("Tactics:"):
             continue
         body = str(line)[len("Tactics:"):].strip().rstrip(".")
+        # Drop clauses that name the solution AND clauses claiming a MATE. The null-move 'threatens
+        # mate: X' / 'mate in N' claims are unreliable here — they surface only under the warm live
+        # engine, and on a DRAWN/equal result there is no forced mate at all, so they hand the coach a
+        # phantom ('the opponent threatens mate: Ra4#' on a dead-drawn rook ending). The useful deep
+        # facts — defensive resources ('go from winning to losing'), mutually-defending pairs — carry
+        # no 'mate' word, so this keeps them.
         kept = [c.strip() for c in body.split(";")
-                if not any(m and m in c for m in solution_moves)]
+                if not any(m and m in c for m in solution_moves) and "mate" not in c.lower()]
         if kept:
             return ("Key tactical features of the position — surface the one that explains why simple "
                     "tries fail (a defensive resource like a saving check, a mutually-defending pair): "
