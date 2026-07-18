@@ -155,10 +155,14 @@ class VerdictPrompt:
         "grounded ONLY in the facts, stay encouraging, and nudge them back toward the idea WITHOUT "
         "naming the correct move. Build the explanation in three beats: (1) the refuting move the facts "
         "give you and the CONCRETE thing it does (captures a piece, gives check, forces a retreat); "
-        "(2) WHY that is possible — what the played move left undefended or failed to deal with; "
-        "(3) the RESULT — what the position BECOMES for the player, using the swing the facts state "
-        "(a winning position turned losing, or still fine but not the cleanest). Do not soften a move "
-        "the facts call losing into 'a small inaccuracy'. Never reveal the solution move."
+        "(2) WHY it is possible — the facts give you ONE sentence stating the exact mechanism (a "
+        "defender was walked off; the piece moved onto a square the opponent still guards; a piece was "
+        "already hanging). Use THAT specific reason in your own words — do NOT fall back on a generic "
+        "'you left it undefended' when the facts say the piece moved onto a guarded square or something "
+        "else; naming the wrong mechanism is a grounding error. (3) the RESULT — what the position "
+        "BECOMES for the player, using the swing the facts state (a winning position turned losing, or "
+        "still fine but not the cleanest). Do not soften a move the facts call losing into 'a small "
+        "inaccuracy'. Never reveal the solution move."
     )
 
     @classmethod

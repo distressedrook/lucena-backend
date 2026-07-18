@@ -219,11 +219,17 @@ def _swing_phrase(after_wp, best_wp) -> str | None:
 
 def _why_loses(pre_fen: str | None, uci: str | None, pv: list) -> str | None:
     """Derive the INSTRUCTIVE reason a move drops material — the coaching point, not just the outcome.
-    The refutation says WHAT the opponent wins ('Rxe1 wins the rook'); this says WHY it is possible:
-    the move walked a defender off, or ignored an already-hanging piece. Deterministic, from the board's
-    own defender counts (`Board.defenders`), so it is grounded, not guessed — and it never names the
-    solution move. Returns a sentence or None (only material-winning capture refutations have this
-    shape). See the tactic-reason-derivation research note: this is the first concrete deriver."""
+    The refutation says WHAT the opponent wins ('Rxe1 wins the rook'); this says WHY it is possible.
+    Deterministic, from the board's own defender/attacker sets (`Board.defenders`/`attackers`), so it
+    is grounded not guessed, and it never names the solution move. Two failure modes:
+
+      A. You moved a piece INTO a square the opponent still guards — it is recaptured (a premature
+         sac / bad trade). The refuted square IS the move's destination.
+      B. You moved a DEFENDER off a piece that then hangs, or ignored an already-hanging piece. The
+         refuted square is a different, stationary piece of yours.
+
+    Returns a sentence or None (only capture refutations lose material this way). First concrete
+    deriver from the tactic-reason-derivation note."""
     if not pre_fen or not uci or not pv:
         return None
     refute = pv[0]
@@ -233,17 +239,37 @@ def _why_loses(pre_fen: str | None, uci: str | None, pv: list) -> str | None:
     try:
         from lucena_engine.board import Board
         b = Board(pre_fen)
+        after = b.apply(uci)
+        from_sq, dest = uci[:2].lower(), uci[2:4].lower()
+        moved = next((p for p in b.piece_list() if p.square == from_sq), None)
+        mword = _PIECE_WORD.get((moved.piece if moved else "").upper(), "piece") if moved else "piece"
+        opp = "black" if (moved and moved.color == "white") else "white"
+
+        # CASE A — you moved this piece INTO the square where it is captured.
+        if sq == dest:
+            took = next((p for p in b.piece_list() if p.square == dest), None)   # what the move grabbed
+            gain = f" and takes the {_PIECE_WORD.get(took.piece.upper(), 'pawn')}" if took else ""
+            # Name the guard that recaptures — the one whose piece matches the refuting move.
+            want = refute[0] if refute[:1].isupper() else "P"
+            guard = next((g for g in after.attackers(dest, opp)
+                          if next((p.piece.upper() for p in after.piece_list() if p.square == g), "") == want),
+                         None)
+            gtxt = ""
+            if guard:
+                gp = next((p for p in after.piece_list() if p.square == guard), None)
+                gword = _PIECE_WORD.get((gp.piece if gp else "").upper(), "pawn") if gp else "piece"
+                gtxt = f" the {gword} on {guard} still guards {dest}, so"
+            return (f"Your {mword} moves to {dest}{gain}, but{gtxt} {refute} recaptures it — you give "
+                    f"up the {mword}, coming out behind on the exchange.")
+
+        # CASE B — a stationary piece of yours is left short of defenders.
         victim = next((p for p in b.piece_list() if p.square == sq), None)
         if victim is None:
             return None
         vword = _PIECE_WORD.get(victim.piece.upper(), "pawn")
         before = set(b.defenders(sq))                 # squares of the player's pieces guarding `sq`
-        after = b.apply(uci)
-        still = any(p.square == sq for p in after.piece_list())   # the victim didn't itself move
+        still = any(p.square == sq for p in after.piece_list())
         after_def = set(after.defenders(sq)) if still else set()
-        from_sq = uci[:2].lower()
-        moved = next((p for p in b.piece_list() if p.square == from_sq), None)
-        mword = _PIECE_WORD.get((moved.piece if moved else "").upper(), "piece") if moved else "piece"
         if from_sq in before and from_sq not in after_def:
             return (f"The {mword} you moved from {from_sq} was the ONLY thing defending your {vword} on "
                     f"{sq}; moving it leaves the {vword} undefended, so {refute} wins it for free."
