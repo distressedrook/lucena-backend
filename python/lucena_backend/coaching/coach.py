@@ -16,7 +16,7 @@ from .grounding import (
     _brief_move, _brief_reply, _created_threat, _deep_tactics, _draws_by_stalemate, _invented_moves,
     _node_at, _node_solutions, _numbered, _solution_moves, _why_loses, tiered_bit_grounding,
     you_move_beat)
-from ..reasoning import undermines_defender
+from ..reasoning import describe_plan, pv_san_to_uci, undermines_defender
 from .handler_base import HandlerBase
 from .lesson import ACTIVE, LessonProgress, puzzle_lesson_id, puzzle_spec
 from .loop import Handled, Open, Outcome, Suspend
@@ -367,10 +367,16 @@ class CoachHandler(HandlerBase):
             move_read = _brief_move(verdict, hide_best=False)
             positional = "\n".join(str(x) for x in getattr(grounding, "always", []) or [])
             created = _created_threat((post or {}).get("analysis") or [], sols)
-            # THE POINT: prefer the derived causal reason (the reasoner — 'attacks the only defender of
-            # the a2 bishop') over the static deep-tactics defender fact; the two overlap and the derived
-            # one is the causal, non-redundant version. Fall back to _deep_tactics when it doesn't fire.
-            point = (undermines_defender(inp.fen, inp.uci)
+            # THE POINT, most-causal first: the MULTI-PLY plan (walk the engine PV → the target the move
+            # actually wins, verified, not just "threatened"), then the single-ply undermine motif, then
+            # the static deep-tactics defender fact. The plan speaks the PLAYED line, so trust it only
+            # when the played move IS the engine's best (its PV head); its cp-gated claim can't survive a
+            # losing sac. Each is the causal, non-redundant version of the next; fall through on None.
+            pv_ucis = pv_san_to_uci(inp.fen, (verdict.get("best") or {}).get("pv_san"))
+            plan = (describe_plan(inp.fen, pv_ucis, (verdict.get("eval") or {}).get("cp"))
+                    if pv_ucis and pv_ucis[0] == inp.uci else None)
+            point = (plan
+                     or undermines_defender(inp.fen, inp.uci)
                      or _deep_tactics((pre or {}).get("analysis") or [], sols))
             # Point FIRST — it is the reason the move is the move; the capture read and the generic
             # positional context are secondary and must not become the lead.

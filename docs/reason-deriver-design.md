@@ -110,3 +110,70 @@ low-value/high-risk, or owner-deferred — not forgotten.
 - This is the LLD's "calculate vs interpret" line moving further toward *calculate*: we now derive the
   WHY deterministically instead of letting the model narrate it. Worth a note in LLD.md §9.
 - Big surface change → every phase goes through `./review-loop.sh` (Codex must PASS).
+
+## Reasoning layer — the `reasoning/` package (beyond verdict grounding)
+
+The relevance-filtered grounding above tells the coach WHICH facts to use. The `reasoning/` package is
+the next step in — it DERIVES the causal point of a move so the LLM only verbalizes it. One function per
+motif, `(...) -> str | None` (None = "this motif doesn't explain this move"), fed FIRST into the
+correct-branch `point` in `coach._move_facts`, ahead of the static defender fact.
+
+### Multi-ply plan — `line.describe_plan` — ✅ SHIPPED
+
+The single-ply motifs (`undermine`) label ONE move, so they can only say a piece is *threatened* — they
+don't see the reply. `describe_plan` walks the engine's **principal variation** (which already contains
+the opponent's best defense), finds the **target the player actually wins**, and upgrades the hedge to a
+verified statement: "threatening to win the knight" → "it undermines the only defender of Black's bishop
+on a2 — it cannot be held, and falls." Spoiler-safe (names the target piece, never a future move).
+
+Two guards, both hard-won from validation:
+- **ABSOLUTE final material on STANDARD values** (not the compressed grounding scale R=4/N=2, and not the
+  material *swing*). We count pieces on the actual final board and require the mover to both NET material
+  over the line (`final > pre`) AND end up AHEAD (`final > 0`), plus the target square must not be
+  recaptured. This took three cuts, each closing a hole the last let through: (a) the running-material
+  *peak* credited the transient spike of a plain trade (Rxd8, Kxd8) as a won rook; (b) the *swing*
+  credited an incidental pawn grabbed while still down a rook in a sacrificial attack; (c) `final > 0`
+  alone was fooled by a *pre-existing surplus* — up a rook, trade it for a knight on a different square,
+  still shows +2. `final > pre` is the invariant that rejects all three (the even trade included: `pre`
+  and `final` are equal). Cuts (a) and (c) were caught by the local review loop, not by the scale run.
+- **A lenient cp floor** (mover-POV eval ≥ +100, from `evaluate`'s `eval.cp`). The material test does the
+  real work; cp only catches the rare "even on the board but the position is lost." A *coupled* cp gate
+  (threshold ∝ target value) was tried and **rejected** — it over-filtered genuine wins (66%→37%) without
+  fixing the real bug, which was in the material accounting, not cp.
+
+Wired only when the played move IS the engine's best (its PV head: `pv_ucis[0] == inp.uci`), so the
+"point of THIS move" always describes the played line. Fixtures + scale run: `test_reasoning_line.py`;
+**150 Lichess puzzles → fired 67%, verified 101/101 (100%), 0 false.** Methodology note worth keeping:
+the FIRST scale run reported 100% too, but its verifier reused the reasoner's own peak walk — it was
+self-confirming and blind to exactly the bug a local review caught. The verifier was rebuilt to be
+independent (count material on the real final board; confirm the last capture on the target square was
+the player's) — that dropped the honest number to 87% and surfaced the false positives now fixed.
+Fire-by-theme is a good honesty signal: high on `crushing`/`advantage`/`fork`/`pin`, low on `mate` (2/32)
+and `mateIn2` (2/16) — a mate wins no material, so it correctly stays quiet instead of inventing one.
+
+### Positional term-delta — ⏸️ PARKED (research), NOT built
+
+The material reasoners are silent on a good *quiet* move (wins nothing, threatens nothing). The idea:
+diff the engine-side **five-term positional read** (`analyze_positional` → material, king safety, piece
+activity, pawn structure, centre, each in cp) before/after the move; the largest positive NON-material
+term-delta names the reason ("it improves White's king safety"). Same shape as the material path —
+derive deterministically, LLM verbalizes — for a new coverage class.
+
+Prototyped and validated on tactical + positional Lichess slices. **Verdict: not shippable as-is, but
+the engine cp makes it viable.** Findings, for whoever picks this up:
+- **Raw single-ply term-delta mislabels tactics.** It fired on mates and sacrifices, slapping "improves
+  king safety / piece activity" on a *tactic* the material reasoner missed (a mating move relocates a
+  piece → the activity term jumps). Confident and wrong — the opposite of the layer's 0-false-positive
+  bar. These five cp numbers are OUR piece-square heuristic, not Stockfish; their "why" ≠ the engine's.
+- **The engine cp is the discriminator — specifically its CEILING.** Gating to a "good but not winning"
+  band (≈ +50…+350cp mover-POV) dropped the mate/crushing misattributions (a mate/+485 eval ⇒ the point
+  is a tactic, not a positional nudge) and kept the genuine positional moves, which clustered tightly
+  (+237…+295). On the tactical slice 4 raw fires → 1 survived; on the positional slice 4 → 4 survived.
+- **Two gates still needed before shipping:** the cp-ceiling band AND a *quietness* gate (non-capture,
+  non-check, engine best line non-forcing) — a +161 fork slipped the cp band alone.
+- **Lichess is the wrong corpus** — tactical by construction, so even the "positional/advantage/quietMove"
+  tags are ~78% material tactics; it exercises the positional path only ~6% of the time. Real validation
+  needs quiet-positional master games, not a tactics DB.
+
+Prototype lives in the experiment scratch (not committed to the package). Lower precision than
+`describe_plan` (heuristic, not ground truth) → if built, it is the LAST fallback, always cp-gated.
