@@ -123,8 +123,17 @@ def describe_plan(pre_fen: str | None, pv: list | None, cp: int | None = None) -
             return None
         piece, sq = max(kept, key=lambda c: _v(c[0]))
         target = f"{opp_cap}'s {word(piece)} on {sq}"
-        # If the played move undermines that target's sole defender, this is the verified undermining
-        # plan — state the fall as CERTAIN (the PV already contains the opponent's best defense).
+        dest0 = pv[0][2:4].lower()
+        recaptured = any((not bp) and s2 == sq and ply2 > 0 for bp, _, s2, ply2 in caps)
+        # The win lands on the played move's OWN square via a recapture (you take on `sq`, the opponent
+        # recaptures there, you win THAT piece). This is a trade-and-win, NOT an undermine — and at
+        # verdict time `sq` still shows what the move just captured, so "the {piece} on {sq}" reads as a
+        # contradiction. Name the SEQUENCE instead so it stays legible.
+        if sq == dest0 and recaptured:
+            return (f"The point of this move: it wins material on {sq} — after {opp_cap} recaptures "
+                    f"there, the {word(piece)} cannot be held and falls.")
+        # A true undermine: the played move pulls the target's sole defender on a DIFFERENT square, so
+        # the target falls. State it CERTAIN (the PV already contains the opponent's best defense).
         if _first_move_undermines(pre, pv[0], sq, me):
             return (f"The point of this move: it undermines the only defender of {target} — it cannot "
                     f"be held, and falls.")

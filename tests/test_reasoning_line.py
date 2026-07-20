@@ -14,6 +14,12 @@ UNDERMINE_KNIGHT = (
     "r4rk1/p1R2pb1/2p2p1p/2q1pQ2/4P3/2N5/PPP2PPP/R5K1 b - - 0 15",
     ["c5b6", "c7d7", "b6b2", "a1d1", "b2c3", "h2h4", "g8h8", "d1d6"], 232,
 )
+# Qxc4 takes the rook; Black recaptures on c4 with the queen; Nxc4 wins it. The win lands on the
+# PLAYED move's own square via a recapture — a sequence, NOT an undermine.
+RECAPTURE_QUEEN = (
+    "4r1k1/2q2pbp/p2p2p1/3Qp3/P1r5/2n1P3/1B1N1PPP/R2R2K1 w - - 6 26",
+    ["d5c4", "c7c4", "d2c4", "c3d1", "a1d1", "e8b8"], 416,
+)
 
 
 def test_wins_target_names_the_piece_that_falls():
@@ -28,6 +34,16 @@ def test_undermine_plan_states_the_fall_as_certain():
     # the causal chain, stated CERTAIN (the PV already holds the opponent's best defense)
     assert out == ("The point of this move: it undermines the only defender of White's knight on c3 "
                    "— it cannot be held, and falls.")
+
+
+def test_recapture_win_reads_as_a_sequence_not_an_undermine():
+    # When the target is won ON the played move's own square (Qxc4 … Qxc4 … Nxc4), naming "the queen on
+    # c4" reads as a contradiction at verdict time (c4 shows the rook you just took). Bridge it instead.
+    fen, pv, cp = RECAPTURE_QUEEN
+    out = describe_plan(fen, pv, cp)
+    assert out == ("The point of this move: it wins material on c4 — after Black recaptures there, "
+                   "the queen cannot be held and falls.")
+    assert "undermine" not in out          # a trade-and-win must not masquerade as an undermine
 
 
 def test_cp_floor_drops_the_claim_when_the_engine_disagrees():

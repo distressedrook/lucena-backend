@@ -9,6 +9,6 @@ Public surface: one function per motif, each `(pre_fen, uci) -> str | None`. A N
 does not explain this move" — callers move on to the next motif or fall back.
 """
 from .line import describe_plan, pv_san_to_uci
-from .undermine import undermines_defender
+from .undermine import attacks_defender, undermines_defender
 
-__all__ = ["undermines_defender", "describe_plan", "pv_san_to_uci"]
+__all__ = ["undermines_defender", "attacks_defender", "describe_plan", "pv_san_to_uci"]
