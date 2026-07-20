@@ -8,11 +8,13 @@ Orchestrator helpers; the handlers add only their own control flow on top.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 
 from ..llm import GenerateOptions, LLMAdapter, Message
 
 _JSON_OBJECT = {"type": "object"}
+_log = logging.getLogger(__name__)
 
 
 class HandlerBase:
@@ -29,9 +31,16 @@ class HandlerBase:
         if os.environ.get("LUCENA_DEBUG_PROMPT"):
             print(f"\n===== LLM PROMPT =====\n--- SYSTEM ---\n{system}\n\n--- USER ---\n{prompt}\n"
                   f"======================", flush=True)
-        comp = await self._llm.generate(
-            [Message("system", system), Message("user", prompt)],
-            GenerateOptions(model=self.model, schema=_JSON_OBJECT, max_tokens=400, temperature=0.4))
+        try:
+            comp = await self._llm.generate(
+                [Message("system", system), Message("user", prompt)],
+                GenerateOptions(model=self.model, schema=_JSON_OBJECT, max_tokens=400, temperature=0.4))
+        except Exception as exc:  # noqa: BLE001 — an LLM outage / rate-limit (429) must never break the
+            # turn: return empty so every caller falls back to its grounded text (`out.get('text') or …`,
+            # the verdict loop's `_safe_verdict`). The adapter already retried transient blips; a sustained
+            # quota exhaustion needs graceful degradation, not a crash that flashes the app's "Uh oh".
+            _log.warning("LLM generate failed; coach degrades to grounded fallback: %s", exc)
+            return {}
         if os.environ.get("LUCENA_DEBUG_PROMPT"):
             print(f"--- RESPONSE ---\n{comp.text}\n======================", flush=True)
         return comp.json or {}
