@@ -69,7 +69,7 @@ def test_right_verdict_carries_the_deep_point():
     g = FakeGround({"b5c4": RIGHT}, analysis=analysis)
     s = _facts(_handler(g), "b5c4", correct=True)
     assert "Rh1+" in s, "the deep tactical point (the defensive resource) must reach the verdict"
-    assert "Key tactical features" in s, "deep-tactics framing must be present on the right path"
+    assert "The point of this move" in s, "deep-tactics framing must be present on the right path"
 
 
 def test_right_verdict_drops_the_refutation_framing():

@@ -85,21 +85,32 @@ def _texts(store):
 FEN = "1k5r/4q3/1pp5/3bNp2/6p1/P5P1/1P3P2/3QRK2 w - - 0 1"
 
 
-def test_correct_midline_move_echoes_you_then_verdict_then_reply():
+def test_correct_midline_move_echoes_you_then_reply_no_verdict():
+    # v1: a RIGHT move gets NO auto verdict (the app adds a local praise). Only the move bubble (with the
+    # ✓ badge) and the opponent's auto-played reply speak — the reply is game-progress, not interpretation.
     store = _Store(_lesson())
     h = _handler(store, REPLY)
     asyncio.run(h.handle(Input(kind="move", uci="d1d5", san="Qxd5", fen=FEN)))
-    # (1) the player's own move as a "you played" bubble, (2) the verdict, (3) the opponent's reply.
-    assert _texts(store) == ["Played Qxd5 — takes the bishop", "VERDICT", "REPLY:cxd5"]
+    assert _texts(store) == ["Played Qxd5", "REPLY:cxd5"]     # NO "VERDICT", NO "— takes the bishop"
     you = store.beats[0]
     assert you["kind"] == "you" and you["correct"] is True and you["move"] == "Qxd5"
 
 
-def test_no_reply_still_echoes_the_move_then_the_verdict():
+def test_no_reply_emits_only_the_move_bubble():
+    # A right move with no reply (line ended) → only the ✓ bubble; the verdict is gone from the hot path.
     store = _Store(_lesson())
-    h = _handler(store, None)          # walker returned no reply (line ended / wrong move)
+    h = _handler(store, None)
     asyncio.run(h.handle(Input(kind="move", uci="d1d5", san="Qxd5", fen=FEN)))
-    assert _texts(store) == ["Played Qxd5 — takes the bishop", "VERDICT"]
+    assert _texts(store) == ["Played Qxd5"]
+
+
+def test_explain_regenerates_the_wrong_move_verdict_on_demand():
+    # v1 'Why?': the wrong-move verdict is no longer auto-shown — kind='explain' (the Why? click)
+    # regenerates the SAME wrong-move explanation on demand, said as one beat, and emits NO move bubble.
+    store = _Store(_lesson())
+    h = _handler(store, None)
+    asyncio.run(h.handle(Input(kind="explain", uci="d1d5", san="Qxd5", fen=FEN)))
+    assert _texts(store) == ["VERDICT"]
 
 
 def test_new_line_reply_announces_the_backtrack_deterministically():

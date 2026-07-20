@@ -48,10 +48,10 @@ _MARKDOWN_RULE = (
 # speak to a named opening's ideas beyond the facts — this rule forbids exactly that.
 _NO_INVENTION_RULE = (
     "GROUNDING (critical): say ONLY what the facts state. Do NOT invent a piece, square, line, "
-    "structure, or evaluation. Do NOT name a tactical motif (pin, fork, skewer, discovered attack, "
-    "zugzwang, …) or characterize a move (sacrifice, combination, brilliancy) unless the facts use "
-    "that word — naming one they do not license is the most common way to be confidently wrong (a "
-    "knight capturing a pawn wins material; it is not a sacrifice). Do NOT claim a MATE, a CHECK, or a "
+    "structure, or evaluation. Do NOT name any tactical motif, or characterize the move, unless the "
+    "facts use that exact word — naming one they do not license is the most common way to be "
+    "confidently wrong (a knight capturing a pawn wins material; do not upgrade it). Do NOT claim a "
+    "MATE, a CHECK, or a "
     "threat against a king that the facts do not state: if the facts describe a repetition, a trade, or "
     "winning a piece, say exactly THAT — never escalate a quiet line into an attack or a 'mate'. Do NOT "
     "attribute a PURPOSE or "
@@ -266,6 +266,25 @@ def _invented_moves(output: str | None, facts: str | None, played: str | None) -
     return bad
 
 
+_MOTIF_WORDS = ("fork", "pin", "skewer", "discovered attack", "discovered check", "double check",
+                "deflection", "decoy", "overload", "interference", "zwischenzug", "zugzwang",
+                "windmill", "x-ray")
+
+
+def _invented_motif(output: str | None, facts: str | None) -> str | None:
+    """A tactical MOTIF the model NAMED that the facts never license — flash-lite dressed a bare 'mate in
+    4' up as 'a fork attacking the king and the rook' when no fork exists. `_NO_INVENTION_RULE` forbids
+    this in the prompt, but the model ignores it, so it is enforced deterministically here. Word-stem
+    match (\\bfork catches fork/forks/forking) with a leading boundary so a substring like 'opinion'
+    can't false-trigger 'pin'. Returns the offending motif or None; a hit means REGENERATE or drop."""
+    o = (output or "").lower()
+    f = (facts or "").lower()
+    for m in _MOTIF_WORDS:
+        if re.search(r"\b" + re.escape(m), o) and not re.search(r"\b" + re.escape(m), f):
+            return m
+    return None
+
+
 def _solution_moves(tree: dict | None) -> list[str]:
     """The move(s) the puzzle expects at the root — the answer, which the deep-tactics read must NOT
     name to a solver. `solve` → its one required move; `mate` → any of the mating options."""
@@ -360,17 +379,34 @@ def _deep_tactics(always_lines, solution_moves, live_fen=None) -> str | None:
         for c in (x.strip() for x in body.split(";")):
             if any(m and m in c for m in solution_moves):
                 continue
+            # A NULL-MOVE threat ('if White ignores Nc5 …' / 'after a pass, Rb1+ is strong') describes
+            # what happens if the mover PASSES — never the point of a move actually played. It also
+            # reads as a bare, contextless threat (a student can't tell which piece plays it, and it may
+            # even be pinned/captured by the very move), so it is not surfaceable as the move's point.
+            if "ignores" in c or "after a pass" in c:
+                continue
+            # A PRE-EXISTING static condition ('the rook on c5 is pinned to the king') is a board fact,
+            # not what THIS move does — surfaced as 'the point' it read as an irrelevant fixation, move
+            # after move, and it's colourless so the model flipped it to 'your rook'. Never the point.
+            if "pinned" in c:
+                continue
             if legal is not None:
                 toks = {t.rstrip("+#") for t in _move_tokens(c)}
                 if toks and not (toks & legal):   # every move it names is now illegal → stale threat
                     continue
             kept.append(c)
-        if kept:
-            return ("Key tactical features that make this the move — the resource it exploits, a "
-                    "defender it removes, or a linchpin it turns on (e.g. 'the knight on c3 is the only "
-                    "defender of the bishop on a2' — the POINT is removing that defender, not the "
-                    "capture itself). Surface the ONE that is the real point of the move: "
-                    + "; ".join(kept) + ".")
+        if not kept:
+            continue
+        # A DECISIVE clause (a forced mate / mate in N) IS the point — surface ONLY it. The background
+        # structural facts (a pre-existing pin, a defender relationship) are TRUE but not why THIS move
+        # is the move; dumping them let the model lead with an irrelevant pin ('your rook is pinned')
+        # move after move. Only when nothing is decisive do the structural features become the point.
+        decisive = [c for c in kept if "mate" in c.lower()]
+        if decisive:
+            return "The point of this move: " + "; ".join(decisive) + "."
+        # No decisive clause → the structural feature the move turns on IS the point (the fallback the
+        # single-ply reasoners don't cover). State it plainly; no priming examples for the model to copy.
+        return "The point of this move turns on: " + "; ".join(kept) + "."
     return None
 
 
@@ -380,8 +416,10 @@ def _created_threat(after_analysis, solution_moves) -> str | None:
     threatens mate: Ra4#' is instructive on BOTH verdicts: on a wrong move the coach can credit the
     threat before the refutation ('it even threatens mate, but…'); on a right move it's the reward.
     Only the loud, decisive threats (a mate threat) are surfaced — a mundane recapture isn't a
-    teaching point. Any clause naming a solution/continuation move is stripped, so a right-move verdict
-    never pre-empts the un-played next drill move. None if the move creates no such threat."""
+    teaching point. The threat is named by its MOVE ('Ra4#'), NOT the king's square — the prompt tells
+    the model to keep the mating move (it confabulated 'a8', the king's square, from a bare 'Ra4#').
+    Any clause naming a solution/continuation move is stripped, so a right-move verdict never pre-empts
+    the un-played next drill move. None if no such threat."""
     for line in (after_analysis or []):
         s = str(line)
         if not s.startswith("Tactics:"):
@@ -391,6 +429,47 @@ def _created_threat(after_analysis, solution_moves) -> str | None:
             if "threatens mate" in clause and not any(m and m in clause for m in solution_moves):
                 return f"The move just played creates this threat: {clause}."
     return None
+
+
+def _fallback_hint(pre_fen: str | None, verdict: dict) -> str | None:
+    """When the grounded hint LADDER is empty — a win outside `derive_hints`' fork/king-hunt/clean-
+    capture scope (e.g. winning a piece via a pin) — fall back to ONE nudge derived from the best move's
+    TARGET: the enemy piece it goes after, by absolute colour+square, NEVER the move itself. This keeps a
+    stuck student pointed at the idea instead of getting invented filler. None when the best move is
+    quiet/positional (no capture target) — then the coach asks a plain question instead."""
+    best_san = ((verdict.get("best") or {}).get("pv_san") or [None])[0]
+    if not best_san or not pre_fen:
+        return None
+    try:
+        from lucena_engine.board import Board
+        b = Board(pre_fen)
+        dest = b.uci(best_san)[2:4].lower()
+        target = next((p for p in b.piece_list()
+                       if p.square == dest and p.color != b.side_to_move), None)
+    except Exception:
+        return None
+    if target is None:                          # best move is not a capture → nothing to point at
+        return None
+    colour = "Black" if b.side_to_move == "white" else "White"
+    word = _PIECE_WORD.get((target.piece or "").upper(), "pawn")
+    return ("HINT for the student — phrase as a Socratic nudge, never the move: "
+            f"{colour}'s {word} on {dest} is the piece to go after.")
+
+
+def _hint_line(hints: list | None, attempts: int) -> str | None:
+    """Pick the Socratic hint rung for THIS attempt from the grounded ladder (`get_hints` — vague →
+    specific, each a partial reveal of the engine PV/geometry, answer-preserving by construction).
+    `attempts` is the count of PRIOR wrong tries, so it 0-indexes the rung: first miss → the vaguest
+    rung, escalating on each retry, capped at the most specific rung (still never the move). None when
+    the line has no tactical handle (a quiet best move → the ladder is empty)."""
+    if not hints:
+        return None
+    rung = hints[min(max(attempts, 0), len(hints) - 1)]
+    text = rung.get("text") if isinstance(rung, dict) else str(rung)
+    if not text:
+        return None
+    return ("HINT for the student — phrase as a Socratic nudge, never as the answer and never naming a "
+            f"move: {text}")
 
 
 def _number_full_line(pre_fen: str | None, sans: list) -> str:
@@ -612,11 +691,14 @@ def _why_loses(pre_fen: str | None, uci: str | None, pv: list, solution_ucis: li
         return None
 
 
-def _brief_move(v: dict, *, hide_best: bool = False) -> str:
+def _brief_move(v: dict, *, hide_best: bool = False, live_fen: str | None = None) -> str:
     """Compact grounding for a played move — the engine's verdict on it. `hide_best` drops the solution
-    move (used on a WRONG drill move, so the coach can't leak the answer while explaining the flaw)."""
+    move (used on a WRONG drill move, so the coach can't leak the answer while explaining the flaw).
+    `live_fen` (the position AFTER the move) drops STALE engine facts — a 'Black threatens Rxc3+' read
+    from the PRE-move board is a lie once the played move vacated c3, and contradicts the real verdict."""
     if not isinstance(v, dict) or v.get("error"):
         return "(no move read available)"
+    legal = _legal_sans(live_fen)
     out = [f"Move played: {v.get('san')}"]
     if v.get("captured"):
         out.append(f"It captures the {v['captured']}.")
@@ -637,6 +719,23 @@ def _brief_move(v: dict, *, hide_best: bool = False) -> str:
     if not hide_best:
         for f in (v.get("facts") or []):
             if isinstance(f, dict) and (t := f.get("text")):
+                # A null-move threat ('if White ignores Nc5 …' / 'after a pass, Rb1+ is strong') describes
+                # PASSING, not the move played — confusing as a move fact.
+                if "ignores" in t or "after a pass" in t:
+                    continue
+                # A raw 'X is the only defender of Y' fact gets over-read into 'so Y falls' — but whether Y
+                # falls depends on the opponent's reply (it's often a FORK: one piece OR the other). The
+                # curated point reasoner owns defender framing with the right certainty; drop the raw fact.
+                # A static 'X is pinned to Y' is likewise background, not what the move does, and colourless
+                # (the model flipped it to 'your rook') — drop it too.
+                if "only defender" in t or "pinned" in t:
+                    continue
+                # STALE: a fact naming only moves the just-played move has made impossible (a threat
+                # against a piece that just moved) — it contradicts the real, post-move verdict.
+                if legal is not None:
+                    toks = {tk.rstrip("+#") for tk in _move_tokens(t)}
+                    if toks and not (toks & legal):
+                        continue
                 out.append(t if t.endswith((".", "!", "?")) else t + ".")
     if not hide_best and (b := v.get("best")) and b.get("san") and b.get("san") != v.get("san"):
         out.append(f"The engine's best move here is {b['san']}.")
@@ -665,12 +764,9 @@ def _brief_move(v: dict, *, hide_best: bool = False) -> str:
             else _move_phrase(first)
         last = numbered[-1] if numbered else first
         out.append(f"{replier_col} refutes it with {numbered[0] if numbered else first} "
-                   f"({phrase}). The refutation line is EXACTLY these {len(numbered)} move(s) and no "
-                   f"more: {labeled}. It ENDS at {last}. Explain the flaw using ONLY these moves — you "
-                   f"may describe what they achieve (a piece won, a trade forced, a position reached), "
-                   f"but you must NOT add, extend, or invent any move after {last}: no further check, "
-                   f"fork, or 'mate in N' unless it literally appears above. If the line is short, the "
-                   f"explanation is short. Name a captured piece ONLY as written here — never guess.")
+                   f"({phrase}). The full refutation, for YOUR reference: {labeled} — it ENDS at "
+                   f"{last}, and nothing exists past {last} (introduce no further move, capture, check, "
+                   f"fork, or 'mate in N' beyond it; name a captured piece only as written here).")
     return "\n".join(out)
 
 
@@ -714,8 +810,9 @@ def you_move_beat(pre_fen: str | None, uci: str | None, san: str | None,
             after_fen = Board(pre_fen).apply(uci).fen
         except Exception:
             after_fen = None
-    captured = _pv_capture_victims(pre_fen, None, [san])[0] if (pre_fen and san) else None
-    text = f"Played {san or uci}" + (f" — takes the {captured}" if captured else "")
+    # v1: the bubble is just the move — no "— takes the X" narration (the LLM/grounding does not
+    # interpret the move on the hot path; a right move gets only the ✓, a wrong move the ✗ + Why?).
+    text = f"Played {san or uci}"
     beat: dict = {"kind": "you", "stops": False, "segments": [{"text": text}]}
     if correct is not None:
         beat["correct"] = bool(correct)

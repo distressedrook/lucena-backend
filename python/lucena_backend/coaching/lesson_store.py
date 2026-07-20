@@ -18,7 +18,7 @@ import os
 import tempfile
 
 from .bits import BitProgress
-from .lesson import ACTIVE, OPEN, LessonProgress
+from .lesson import ACTIVE, OPEN, SUSPENDED, LessonProgress
 
 
 def _bucket(user_id: str | None) -> str:

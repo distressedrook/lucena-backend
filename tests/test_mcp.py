@@ -2292,3 +2292,52 @@ def test_set_puzzle_empty_deck_is_structured_error(tmp_path, monkeypatch):
         r = ctx.set_puzzle()
     assert r.get("error") == "no_puzzles" and r.get("detail")
     assert store.frame_depth == 1                  # nothing pushed on failure
+
+
+# -- conversation mode on the wire (the app's drill header) ---------------------------------------
+
+def _puzzle_lesson(store, lesson_id="l1"):
+    from lucena_backend.coaching.lesson import LessonProgress, LessonSpec, OPEN
+    store.save_lesson_spec(LessonSpec(id=lesson_id, type="puzzle", fen="8/8/8/8/8/8/8/8 w - - 0 1",
+                                      bits=[]))
+    store.save_lesson_progress(LessonProgress(lesson_id=lesson_id, state=OPEN, bits=[]))
+
+
+def test_mode_snapshot_defaults_freeform(store):
+    modes = [p for ch, p in store.snapshot() if ch == "mode"]
+    assert len(modes) == 1
+    assert modes[0]["mode"] == "freeform"
+    assert modes[0]["suspended"] is False
+    assert modes[0]["lesson_type"] is None
+
+
+def test_mode_follows_lesson_state(store):
+    from lucena_backend.coaching.lesson import ACTIVE, OPEN, SUSPENDED
+    _puzzle_lesson(store)
+    store.activate_lesson("l1")
+    p = store._mode_payload()
+    assert p["mode"] == "coach" and p["suspended"] is False and p["lesson_type"] == "puzzle"
+
+    # a what-if parks the drill: freeform again, but the drill still governs (header stays)
+    store.set_lesson_state("l1", SUSPENDED)
+    p = store._mode_payload()
+    assert p["mode"] == "freeform" and p["suspended"] is True and p["lesson_type"] == "puzzle"
+
+    store.set_lesson_state("l1", ACTIVE)
+    assert store._mode_payload()["mode"] == "coach"
+
+    # leaving (back button / spoken 'stop') releases the chat entirely
+    store.set_lesson_state("l1", OPEN)
+    p = store._mode_payload()
+    assert p["mode"] == "freeform" and p["suspended"] is False and p["lesson_type"] is None
+
+
+def test_mode_solved_progress_returns_to_freeform(store):
+    from lucena_backend.coaching.lesson import LessonProgress
+    _puzzle_lesson(store)
+    store.activate_lesson("l1")
+    assert store._mode_payload()["mode"] == "coach"
+    prog = store.get_lesson("l1").progress
+    prog.meta = "solved"
+    store.save_lesson_progress(prog)     # the conclusion write → active_lesson() reads None
+    assert store._mode_payload()["mode"] == "freeform"

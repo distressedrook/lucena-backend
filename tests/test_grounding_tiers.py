@@ -104,7 +104,8 @@ RIGHT_EVAL = {
     "san": "bxc4", "captured": "bishop", "class": "only_move",
     "best": {"san": "bxc4"}, "side_to_move": "black", "fen": "8/8/8/8/8/8/8/8 b - - 0 1",
     "facts": [{"kind": "hanging", "text": "bxc4 wins the bishop on c4"},
-              {"kind": "threat", "text": "after a pass, Bb3 is strong for the opponent"}],
+              {"kind": "threat", "text": "Bb3 hits the rook"},
+              {"kind": "threat", "text": "after a pass, Nd6 is strong for the opponent"}],
 }
 WRONG_EVAL = {
     "san": "Nxe4", "captured": "pawn", "class": "blunder",
@@ -118,7 +119,9 @@ def test_brief_move_right_includes_engine_facts():
     s = _brief_move(RIGHT_EVAL, hide_best=False)
     assert "Move played: bxc4" in s
     assert "wins the bishop on c4" in s, "the engine's own move-level 'why' was dropped"
-    assert "Bb3 is strong" in s
+    assert "Bb3 hits the rook" in s, "a genuine engine 'why' fact must flow through"
+    # ...but a null-move threat ('after a pass, Nd6 …') is filtered — it describes passing, not the move.
+    assert "after a pass" not in s and "Nd6" not in s
 
 
 def test_brief_move_wrong_hides_the_solution():
@@ -142,7 +145,7 @@ def test_brief_move_labels_each_side_in_the_refutation():
     assert "2... Nef6" not in s, "a Black move following White must not carry the dotted number"
     assert "White refutes it with 2. Qe3" in s
     assert "opponent" not in s and "(you)" not in s, "facts must use colours, not relative words"
-    assert "EXACTLY these 2 move(s)" in s and "ENDS at Nef6" in s, "the line must be hard-bounded"
+    assert "ENDS at Nef6" in s and "nothing exists past Nef6" in s, "the line must be hard-bounded"
 
 
 def test_brief_move_never_capitalises_a_move_token():
@@ -193,12 +196,12 @@ def test_brief_reply_flags_check_and_degrades():
     assert _brief_reply("x", None) == "(no reply read available)"
 
 
-def test_you_move_beat_carries_badge_chip_and_capture():
-    # White sacrifices the queen: Qxd5 takes the bishop. The bubble names the capture, carries the
-    # verdict badge, the SAN chip, and the after-move FEN to snap to.
+def test_you_move_beat_carries_badge_and_chip():
+    # v1: the bubble is JUST the move — no "— takes the X" narration. It still carries the verdict badge,
+    # the SAN chip, and the after-move FEN to snap to.
     b = you_move_beat("1k5r/4q3/1pp5/3bNp2/6p1/P5P1/1P3P2/3QRK2 w - - 0 1", "d1d5", "Qxd5", correct=True)
     assert b["kind"] == "you"
-    assert b["segments"][0]["text"] == "Played Qxd5 — takes the bishop"
+    assert b["segments"][0]["text"] == "Played Qxd5"          # no capture narration
     assert b["correct"] is True and b["move"] == "Qxd5"
     assert b["fen"].split()[1] == "b", "the after-move FEN is Black to move"
 

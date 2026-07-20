@@ -217,7 +217,8 @@ def test_each_user_resolves_their_own_active_chat(tmp_path):
 _PUBLIC = {"/health", "/auth/register", "/auth/login", "/auth/logout"}
 _GATED = [
     ("GET", "/sessions"), ("GET", "/session"), ("POST", "/session/new"), ("POST", "/session"),
-    ("POST", "/move"), ("POST", "/drill"), ("POST", "/analyze"), ("GET", "/config"),
+    ("POST", "/move"), ("POST", "/drill"), ("POST", "/lesson"), ("POST", "/analyze"),
+    ("GET", "/config"),
 ]
 
 
@@ -306,7 +307,8 @@ def test_asking_for_another_users_chat_is_403_not_500(tmp_path, monkeypatch):
                   client.post("/session", json={"session_id": theirs}, headers=h1),
                   client.post("/move", json={"uci": "e2e4", "session_id": theirs}, headers=h1),
                   client.post("/drill", json={"fen": "8/8/8/4k3/8/4K3/8/7R w - - 0 1",
-                                              "session_id": theirs}, headers=h1)):
+                                              "session_id": theirs}, headers=h1),
+                  client.post("/lesson", json={"op": "leave", "session_id": theirs}, headers=h1)):
             assert r.status_code == 403, f"expected 403, got {r.status_code}: {r.text[:120]}"
 
         assert store.db.session_owner(theirs) == (True, u2)             # still B's
