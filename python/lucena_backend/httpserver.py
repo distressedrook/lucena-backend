@@ -187,8 +187,11 @@ def build_app(*, home: str, llm=None, model: str = _DEFAULT_MODEL,
             return await asyncio.to_thread(_set_view_and_walk, msg)
         elif t == "input":
             await asyncio.to_thread(store.set_input, msg.get("data") or msg)
-        # RETIRED (folded into the loop): `explain` (QuickCoach) → freeform move-explain;
-        # `drill` (old arm path) → coach-mode lesson entry. Both intentionally no longer routed.
+        elif t == "explain":
+            # On-demand "Why?" for a HELD wrong drill move (v1: the verdict is no longer auto-shown).
+            # The wrong move is still on the board, so fen+uci are enough to regenerate today's text.
+            await loop.handle_input(sid, _Input(kind="explain", uci=msg.get("uci"), fen=msg.get("fen")))
+        # RETIRED: `drill` (old arm path) → coach-mode lesson entry. Intentionally not routed.
 
     async def _handle(msg: dict, sid: str):
         # The transport has no catch-all: an unhandled error here (an LLM outage, a bad move) would
@@ -420,6 +423,62 @@ def build_app(*, home: str, llm=None, model: str = _DEFAULT_MODEL,
                 return await asyncio.to_thread(_arm_drill, ctx, store, fen)
         except PermissionError:
             return _forbidden()
+
+    @app.post("/lesson")
+    async def lesson(body: dict):
+        """Leave the current drill (the puzzle screen's back button): mark this chat's live — or
+        what-if-parked — lesson `open` (the resumable state the coach's spoken 'stop' produces, which
+        flips the chat back to freeform), AND finish its activity — drop a card into the base
+        conversation and switch the view home, so the saved puzzle can be reopened. Deterministic, no
+        LLM. Idempotent: a solved drill (no live lesson) still finishes its activity."""
+        from .coaching.lesson import OPEN
+        if body.get("op") != "leave":
+            return JSONResponse({"error": "bad_op"}, status_code=400)
+        try:
+            sid = await _rest_sid(body.get("session_id"))
+        except PermissionError:
+            return _forbidden()
+
+        def _leave() -> bool:
+            with store.bound(sid):
+                live = store.active_lesson() or store.suspended_lesson()
+                if live is not None:
+                    store.set_lesson_state(live.spec.id, OPEN)
+                finished = store.finish_activity()   # card + view home (no-op if already on the base)
+                return live is not None or finished
+
+        return {"ok": True, "left": await asyncio.to_thread(_leave)}
+
+    @app.post("/activity")
+    async def activity(body: dict):
+        """Switch the in-view activity. `op:"open", idx:N` reopens a saved activity by index (a card
+        click, or `idx:0` to return to the base conversation). The saved frame's board/beats/variations
+        replay over the WS. Deterministic, no LLM."""
+        if body.get("op") != "open":
+            return JSONResponse({"error": "bad_op"}, status_code=400)
+        idx = body.get("idx")
+        if not isinstance(idx, int):
+            return JSONResponse({"error": "bad_idx"}, status_code=400)
+        try:
+            sid = await _rest_sid(body.get("session_id"))
+        except PermissionError:
+            return _forbidden()
+
+        def _open() -> bool:
+            with store.bound(sid):
+                if not store.open_activity(idx):
+                    return False
+                # Reopening a saved puzzle makes its drill LIVE again (reactivate the lesson, mode →
+                # coach) so the player can keep solving. Done INLINE — not through the coach turn loop —
+                # because it produces no beat and must NOT toggle the "Thinking…" status: that flagged a
+                # silent turn and flashed the "Uh oh, I didn't catch that" net. The saved board/line/
+                # variations are restored by open_activity's re-render; nothing is re-presented.
+                lid = store.active_frame_lesson_id()
+                if lid:
+                    store.reactivate_lesson(lid)
+                return True
+
+        return {"ok": True, "opened": await asyncio.to_thread(_open)}
 
     @app.post("/analyze")
     async def analyze(body: dict):

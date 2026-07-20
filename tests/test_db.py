@@ -43,21 +43,22 @@ def test_save_and_load_view(dbpath):
     db = DB(dbpath)
     db.save_view("A", last_board={"fen": "x"}, last_analysis=None, last_tree=None, history=None,
                  board_seq=3, beats_seq=2, tree_seq=0, analysis_seq=1)
-    db.add_beats("A", [{"i": 0, "ts": 1.0, **_say("one")},
-                       {"i": 1, "ts": 2.0, **_say("two")}])
     view = db.load_view("A")
     assert view["last_board"] == {"fen": "x"} and view["board_seq"] == 3
-    assert [b["segments"][0]["text"] for b in view["beats"]] == ["one", "two"]
+
+
+def _activity_doc(*, kind="conversation", beats):
+    """A minimal canonical document with one activity frame carrying `beats` — beats now ride ON the
+    activity, so they persist through save_document/_save_activities, not the retired beat sidecar."""
+    return {"activities": [{"kind": kind, "workspace": {}, "beats": beats, "beats_seq": len(beats)}]}
 
 
 def test_clear_view(dbpath):
     db = DB(dbpath)
-    db.save_view("A", last_board={"fen": "x"}, last_analysis=None, last_tree=None, history=None,
-                 board_seq=1, beats_seq=1, tree_seq=0, analysis_seq=0)
-    db.add_beats("A", [{"i": 0, "ts": 1.0, **_say("one")}])
+    db.save_document("A", _activity_doc(beats=[{"i": 0, "ts": 1.0, **_say("one")}]), 1)
     db.clear_view("A")
-    view = db.load_view("A")
-    assert view["beats"] == [] and view["last_board"] is None
+    assert db.load_document("A") is None
+    assert db.load_view("A")["beats"] == []
 
 
 # -- StateStore persistence ------------------------------------------------
@@ -80,22 +81,21 @@ def test_beats_persist_across_restart(tmp_path):
 
 def test_append_beats_persists_in_one_transaction(tmp_path, monkeypatch):
     """Item 9 (regression): append_beats writes the new beats AND the document (with its bumped
-    beats_seq) in a SINGLE save_document call — one transaction — not a separate add_beats then
-    save_document. That closes the crash window where beats_seq could outrun the beat rows."""
+    beats_seq) in a SINGLE save_document call — one transaction. Beats now ride ON the top activity
+    frame, so _save_activities persists them alongside the document; there is no separate beat-only
+    write, closing the crash window where beats_seq could outrun the beat rows."""
     s = StateStore(str(tmp_path), db=DB(str(tmp_path / "lucena_backend.db")))
     s._switch_current("A")
-    calls = {"save_with_beats": 0, "add_beats": 0}
+    calls = {"save": 0}
     real_save = s.db.save_document
-    def spy_save(sid, doc, ver, beats=None):
-        if beats:
-            calls["save_with_beats"] += 1
-        return real_save(sid, doc, ver, beats=beats)
+    def spy_save(sid, doc, ver):
+        calls["save"] += 1
+        # the appended beat rides on the top activity frame in the SAME document
+        assert doc["activities"][-1]["beats"][-1]["segments"][0]["text"] == "one"
+        return real_save(sid, doc, ver)
     monkeypatch.setattr(s.db, "save_document", spy_save)
-    monkeypatch.setattr(s.db, "add_beats",
-                        lambda *a, **k: calls.__setitem__("add_beats", calls["add_beats"] + 1))
     s.append_beats([_say("one")])
-    assert calls["save_with_beats"] == 1     # beats + document written together
-    assert calls["add_beats"] == 0           # NOT a separate beat-only transaction
+    assert calls["save"] == 1                 # beats + document written together, one transaction
 
 
 def test_sessions_are_isolated(tmp_path):

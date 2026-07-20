@@ -76,7 +76,7 @@ CREATE TABLE IF NOT EXISTS session_view (
 CREATE TABLE IF NOT EXISTS session_doc (
     session_id text PRIMARY KEY, version bigint NOT NULL DEFAULT 0, beats_seq int NOT NULL DEFAULT 0,
     status text NOT NULL DEFAULT 'active', gate_awaiting boolean NOT NULL DEFAULT false,
-    gate_pending jsonb, drill_close jsonb);
+    gate_pending jsonb, drill_close jsonb, active_idx int NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS banked (
     session_id text, ord int, concept_id text, PRIMARY KEY (session_id, ord));
 CREATE TABLE IF NOT EXISTS served_puzzle (
@@ -85,6 +85,8 @@ CREATE TABLE IF NOT EXISTS activity (
     session_id text, idx int, kind text NOT NULL DEFAULT 'conversation',
     board_seq int NOT NULL DEFAULT 0, tree_seq int NOT NULL DEFAULT 0, analysis_seq int NOT NULL DEFAULT 0,
     history_seq int NOT NULL DEFAULT 0, view_seq int NOT NULL DEFAULT 0,
+    beats_seq int NOT NULL DEFAULT 0, title text NOT NULL DEFAULT '', status text NOT NULL DEFAULT '',
+    lesson_id text NOT NULL DEFAULT '',
     PRIMARY KEY (session_id, idx));
 CREATE TABLE IF NOT EXISTS board (           -- last_board's fen (last_board is rebuilt via projection)
     session_id text, activity_idx int, fen text, PRIMARY KEY (session_id, activity_idx));
@@ -110,8 +112,9 @@ CREATE TABLE IF NOT EXISTS view (
     session_id text, activity_idx int, fen text, cursor int, side_to_move text,
     line jsonb, tree jsonb, extra jsonb, PRIMARY KEY (session_id, activity_idx));
 CREATE TABLE IF NOT EXISTS beat (
-    session_id text, i int, payload jsonb NOT NULL, ts double precision NOT NULL,
-    PRIMARY KEY (session_id, i));
+    session_id text, activity_idx int NOT NULL DEFAULT 0, i int, payload jsonb NOT NULL,
+    ts double precision NOT NULL,
+    PRIMARY KEY (session_id, activity_idx, i));
 """
 
 _DSN = os.environ.get("LUCENA_PG_DSN", "postgresql:///lucena_dev")
@@ -310,7 +313,8 @@ class DB:
                            "board_seq,beats_seq,tree_seq,analysis_seq FROM session_view "
                            "WHERE session_id=%s", (session_id,)).fetchone()
             beats = [r[0] for r in self._ex(
-                "SELECT payload FROM beat WHERE session_id=%s ORDER BY i", (session_id,)).fetchall()]
+                "SELECT payload FROM beat WHERE session_id=%s AND activity_idx=0 ORDER BY i",
+                (session_id,)).fetchall()]
         return {
             "beats": beats,
             "last_board": row[0] if row else None, "last_analysis": row[1] if row else None,
@@ -336,30 +340,28 @@ class DB:
             self._conn.commit()
 
     # -- the canonical document (decomposed) -------------------------------
-    def save_document(self, session_id: str, document: dict, version: int,
-                      beats: list[dict] | None = None) -> None:
+    def save_document(self, session_id: str, document: dict, version: int) -> None:
         with self._lock:
             self._ex(
                 "INSERT INTO session_doc(session_id,version,beats_seq,status,gate_awaiting,"
-                "gate_pending,drill_close) VALUES(%s,%s,%s,%s,%s,%s,%s) "
+                "gate_pending,drill_close,active_idx) VALUES(%s,%s,%s,%s,%s,%s,%s,%s) "
                 "ON CONFLICT(session_id) DO UPDATE SET version=excluded.version,"
                 "beats_seq=excluded.beats_seq,status=excluded.status,"
                 "gate_awaiting=excluded.gate_awaiting,gate_pending=excluded.gate_pending,"
-                "drill_close=excluded.drill_close",
+                "drill_close=excluded.drill_close,active_idx=excluded.active_idx",
                 (session_id, version, document.get("beats_seq", 0), document.get("status", "active"),
                  bool((document.get("gate") or {}).get("awaiting")),
-                 _j((document.get("gate") or {}).get("pending")), _j(document.get("drill_close"))))
+                 _j((document.get("gate") or {}).get("pending")), _j(document.get("drill_close")),
+                 document.get("active_idx", 0)))
             self._replace_list("banked", session_id, document.get("banked") or [])
             self._replace_list("served_puzzle", session_id, document.get("served_puzzles") or [])
             self._save_activities(session_id, document.get("activities") or [])
-            if beats:
-                self._insert_beats(session_id, beats)
             self._conn.commit()
 
     def load_document(self, session_id: str) -> dict | None:
         with self._lock:
-            row = self._ex("SELECT version,beats_seq,status,gate_awaiting,gate_pending,drill_close "
-                           "FROM session_doc WHERE session_id=%s", (session_id,)).fetchone()
+            row = self._ex("SELECT version,beats_seq,status,gate_awaiting,gate_pending,drill_close,"
+                           "active_idx FROM session_doc WHERE session_id=%s", (session_id,)).fetchone()
             if row is None:
                 return None
             banked = [r[0] for r in self._ex(
@@ -373,15 +375,9 @@ class DB:
             "banked": banked, "served_puzzles": served, "drill_close": row[5],
             "gate": {"awaiting": bool(row[3]), "pending": row[4]},
             "activities": activities,
+            "active_idx": row[6],
         }
         return {"document": document, "version": row[0]}
-
-    def add_beats(self, session_id: str, beats: list[dict]) -> None:
-        if not beats:
-            return
-        with self._lock:
-            self._insert_beats(session_id, beats)
-            self._conn.commit()
 
     def clear_view(self, session_id: str) -> None:
         with self._lock:
@@ -398,23 +394,27 @@ class DB:
         for i, v in enumerate(items):
             self._ex(f"INSERT INTO {table}(session_id,ord,{col}) VALUES(%s,%s,%s)", (session_id, i, v))
 
-    def _insert_beats(self, session_id: str, beats: list[dict]) -> None:
+    def _insert_beats(self, session_id: str, activity_idx: int, beats: list[dict]) -> None:
         for b in beats:
-            self._ex("INSERT INTO beat(session_id,i,payload,ts) VALUES(%s,%s,%s,%s) "
-                     "ON CONFLICT(session_id,i) DO UPDATE SET payload=excluded.payload,ts=excluded.ts",
-                     (session_id, b["i"], Jsonb(b), b.get("ts", 0.0)))
+            self._ex("INSERT INTO beat(session_id,activity_idx,i,payload,ts) VALUES(%s,%s,%s,%s,%s) "
+                     "ON CONFLICT(session_id,activity_idx,i) DO UPDATE SET "
+                     "payload=excluded.payload,ts=excluded.ts",
+                     (session_id, activity_idx, b["i"], Jsonb(b), b.get("ts", 0.0)))
 
     def _save_activities(self, session_id: str, activities: list[dict]) -> None:
         for t in ("activity", "board", "decoration", "decoration_arrow", "decoration_highlight",
-                  "poisoned", "poisoned_move", "ply", "view"):
+                  "poisoned", "poisoned_move", "ply", "view", "beat"):
             self._ex(f"DELETE FROM {t} WHERE session_id=%s", (session_id,))
         for idx, frame in enumerate(activities):
             ws = frame.get("workspace") or {}
             self._ex("INSERT INTO activity(session_id,idx,kind,board_seq,tree_seq,analysis_seq,"
-                     "history_seq,view_seq) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
+                     "history_seq,view_seq,beats_seq,title,status,lesson_id) "
+                     "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                      (session_id, idx, frame.get("kind", "conversation"),
                       ws.get("board_seq", 0), ws.get("tree_seq", 0), ws.get("analysis_seq", 0),
-                      ws.get("history_seq", 0), ws.get("view_seq", 0)))
+                      ws.get("history_seq", 0), ws.get("view_seq", 0), frame.get("beats_seq", 0),
+                      frame.get("title") or "", frame.get("status") or "", frame.get("lesson_id") or ""))
+            self._insert_beats(session_id, idx, frame.get("beats") or [])
             lb = ws.get("last_board")
             if lb and lb.get("fen"):
                 self._ex("INSERT INTO board(session_id,activity_idx,fen) VALUES(%s,%s,%s)",
@@ -464,11 +464,15 @@ class DB:
 
     # -- reassemble helpers ------------------------------------------------
     def _load_activities(self, session_id: str) -> list[dict]:
-        acts = self._ex("SELECT idx,kind,board_seq,tree_seq,analysis_seq,history_seq,view_seq "
-                        "FROM activity WHERE session_id=%s ORDER BY idx", (session_id,)).fetchall()
+        acts = self._ex("SELECT idx,kind,board_seq,tree_seq,analysis_seq,history_seq,view_seq,beats_seq,"
+                        "title,status,lesson_id FROM activity WHERE session_id=%s ORDER BY idx",
+                        (session_id,)).fetchall()
         frames = []
         for a in acts:
             idx = a[0]
+            beats = [r[0] for r in self._ex(
+                "SELECT payload FROM beat WHERE session_id=%s AND activity_idx=%s ORDER BY i",
+                (session_id, idx)).fetchall()]
             decorations = self._load_decorations(session_id, idx)
             poisoned = self._load_poisoned(session_id, idx)
             brow = self._ex("SELECT fen FROM board WHERE session_id=%s AND activity_idx=%s",
@@ -484,7 +488,8 @@ class DB:
                 "board_seq": a[2], "tree_seq": a[3], "analysis_seq": a[4],
                 "history_seq": a[5], "view_seq": a[6],
             }
-            frames.append({"kind": a[1], "workspace": ws})
+            frames.append({"kind": a[1], "workspace": ws, "beats": beats, "beats_seq": a[7],
+                           "title": a[8], "status": a[9], "lesson_id": a[10]})
         return frames
 
     def _load_decorations(self, session_id, idx):

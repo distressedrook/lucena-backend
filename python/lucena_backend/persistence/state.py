@@ -29,6 +29,10 @@ from .statefile import write_state
 
 SCHEMA = 1
 
+# An activity's outcome, shown on its card in the base conversation. "" while it is still live.
+ATTEMPTED_STATUS = "attempted"
+SOLVED_STATUS = "solved"
+
 # The bound chat session for the current execution context. Per-context, NOT per-process: two
 # concurrent turns cannot see each other's value, which is the whole point — a background turn parked
 # in the LLM must still write to the chat it started in, whatever anyone else has opened meanwhile.
@@ -92,22 +96,32 @@ class _Workspace:
 
 @dataclass
 class _Frame:
-    """One activity on the stack (design §7): its kind + the workspace it looks at. `conversation` is
-    the base default; `drill` etc. add fields via the workspace's drill_state. Push/pop is P5."""
+    """One activity on the stack (design §7): its kind + the workspace it looks at + its OWN beats. Each
+    activity owns its conversation: the base frame's beats are 'the session's beats'; a pushed puzzle
+    activity has its own, so a puzzle can be its own saved conversation (per-activity beats). `kind`:
+    `conversation` (base) | `puzzle` | …. Push/pop forks/restores beats along with the workspace."""
     kind: str = "conversation"
     workspace: _Workspace = field(default_factory=_Workspace)
+    beats: list = field(default_factory=list)
+    beats_seq: int = 0
+    # For a saved, re-openable activity (a puzzle): a human title for its card in the parent
+    # conversation, and its outcome (`""` while live | `attempted` | `solved`). Base frame leaves both
+    # empty. The card beat in the base references this frame by index and mirrors these.
+    title: str = ""
+    status: str = ""
+    # The drill this activity IS — so reopening it can make the drill LIVE again (reactivate + present),
+    # not just show a static review. Empty on the base conversation.
+    lesson_id: str = ""
 
 
 @dataclass
 class _Live:
     """One session's live state (state-machine P3). Session-LEVEL fields (the one continuous
     conversation `beats`, the durable Socratic `gate`, the monotonic `version`) are held here directly;
-    the per-frame *workspace* (board/analysis/drill/line/view) lives on the activity STACK
-    (`activities`, `[0]` = base). The per-frame attributes (`last_board`, `board_seq`, …) are exposed as
-    delegating properties onto the top frame's workspace, so every StateStore accessor stays unchanged.
+    the per-frame *workspace* (board/analysis/drill/line/view) AND its beats live on the activity STACK
+    (`activities`, `[0]` = base). The per-frame attributes (`beats`, `last_board`, `board_seq`, …) are
+    exposed as delegating properties onto the top frame, so every StateStore accessor stays unchanged.
     One bundle per Claude session, so switching sessions never leaks beats/board across sessions."""
-    beats: list = field(default_factory=list)
-    beats_seq: int = 0
     # The durable Socratic gate (P2b): persisted so a session resumed mid-probe stays LOCKED (§11).
     gate_awaiting: bool = False
     gate_pending: dict | None = None
@@ -125,8 +139,13 @@ class _Live:
     # already posted by play_move). Surfaced to the coach ONCE via read_input so it doesn't re-praise a
     # drill the player has already moved on from, then cleared. Durable → survives a mid-solve relaunch.
     drill_close: dict | None = None
-    # The activity STACK; activities[-1] is the live (top) frame. One base frame until P5 adds push/pop.
+    # The activity LIST; `activities[0]` is the base conversation. `active_idx` points at the frame
+    # currently IN VIEW (the one the wire projects). A puzzle is a sibling activity, not a transient
+    # stack pop: entering a puzzle appends a frame and moves `active_idx` onto it; going back moves
+    # `active_idx` to the base but KEEPS the puzzle frame (its beats/board/variations), so a card in
+    # the base conversation can reopen it. (The parked what-if excursion still uses pop_activity.)
     activities: list = field(default_factory=lambda: [_Frame()])
+    active_idx: int = 0
     # Per-session RUNTIME state (never persisted — transient). Session-scoped by construction so it can
     # NEVER leak across a switch/new-session: the app→coach input mailbox. (The "current board fen" is NOT
     # a separate field — it derives from the one session board, `last_board`; see StateStore.board_view.)
@@ -138,11 +157,32 @@ class _Live:
 
     @property
     def top(self) -> _Frame:
-        return self.activities[-1]
+        """The activity currently IN VIEW (`active_idx`) — the frame the wire projects. Named `top`
+        for historical reasons (it was the stack top); with re-openable activities it's the active
+        frame, which is the base while a puzzle sits saved as a sibling."""
+        return self.activities[self.active_idx]
 
     @property
     def ws(self) -> _Workspace:
-        return self.activities[-1].workspace
+        return self.top.workspace
+
+    # Beats + beats_seq live on the FRAME (per-activity), delegated here so StateStore accessors and
+    # the wire projection stay unchanged — they always read/write the ACTIVE activity's conversation.
+    @property
+    def beats(self) -> list:
+        return self.top.beats
+
+    @beats.setter
+    def beats(self, v: list) -> None:
+        self.top.beats = v
+
+    @property
+    def beats_seq(self) -> int:
+        return self.top.beats_seq
+
+    @beats_seq.setter
+    def beats_seq(self, v: int) -> None:
+        self.top.beats_seq = v
 
     # -- per-frame attributes delegate to the top workspace (keeps StateStore accessors unchanged) --
     @property
@@ -222,13 +262,18 @@ def _workspace_from_dict(d: dict | None) -> _Workspace:
 
 
 def _frame_to_dict(f: _Frame) -> dict:
-    return {"kind": f.kind, "workspace": _workspace_to_dict(f.workspace)}
+    return {"kind": f.kind, "workspace": _workspace_to_dict(f.workspace),
+            "beats": list(f.beats), "beats_seq": f.beats_seq,
+            "title": f.title, "status": f.status, "lesson_id": f.lesson_id}
 
 
 def _frame_from_dict(d: dict | None) -> _Frame:
     d = d or {}
     return _Frame(kind=d.get("kind", "conversation"),
-                  workspace=_workspace_from_dict(d.get("workspace")))
+                  workspace=_workspace_from_dict(d.get("workspace")),
+                  beats=list(d.get("beats") or []), beats_seq=d.get("beats_seq", 0),
+                  title=d.get("title") or "", status=d.get("status") or "",
+                  lesson_id=d.get("lesson_id") or "")
 
 
 @dataclass
@@ -404,6 +449,7 @@ class StateStore:
     def activate_lesson(self, lesson_id: str) -> None:
         """Bind a lesson active to the CURRENT chat (coach entry)."""
         self._lesson_store.activate(self.current_user, lesson_id, self.current_sid)
+        self.publish_mode()
 
     def get_lesson(self, lesson_id: str):
         return self._pair(self._lesson_store.get(self.current_user, lesson_id))
@@ -415,9 +461,11 @@ class StateStore:
 
     def save_lesson_progress(self, progress) -> None:
         self._lesson_store.put(self.current_user, progress)
+        self.publish_mode()     # a solve sets meta=solved here, which flips the chat back to freeform
 
     def set_lesson_state(self, lesson_id: str, state: str) -> None:
         self._lesson_store.set_state(self.current_user, lesson_id, state)
+        self.publish_mode()
 
     def save_lesson_spec(self, spec) -> None:
         self.library.put(spec)
@@ -457,13 +505,20 @@ class StateStore:
             d = blob["document"]
             if "activities" in d:                             # P3+ frame shape
                 frames = [_frame_from_dict(f) for f in d["activities"]] or [_Frame()]
+                # Beats now persist ON the frame. Back-compat: a pre-per-activity blob has frames with no
+                # beats and the conversation still in the sidecar → seed the BASE frame from the sidecar.
+                if not frames[0].beats and legacy.get("beats"):
+                    frames[0].beats = legacy["beats"]
+                    frames[0].beats_seq = d.get("beats_seq", 0)
                 gate = d.get("gate") or {}
-                return _Live(beats=legacy["beats"], beats_seq=d.get("beats_seq", 0),
-                             gate_awaiting=bool(gate.get("awaiting")), gate_pending=gate.get("pending"),
+                active_idx = d.get("active_idx", 0)
+                if not (0 <= active_idx < len(frames)):        # a corrupt/stale pointer → the base
+                    active_idx = 0
+                return _Live(gate_awaiting=bool(gate.get("awaiting")), gate_pending=gate.get("pending"),
                              status=d.get("status", "active"), banked=d.get("banked") or [],
                              served_puzzles=d.get("served_puzzles") or [],
                              drill_close=d.get("drill_close"),
-                             version=blob["version"], activities=frames)
+                             version=blob["version"], activities=frames, active_idx=active_idx)
             # P1/P2 flat blob → wrap the flat workspace fields into one base frame (compose-on-load)
             ws = _Workspace(
                 last_board=d.get("last_board"), last_analysis=d.get("last_analysis"),
@@ -472,16 +527,17 @@ class StateStore:
                 board_seq=d.get("board_seq", 0), tree_seq=d.get("tree_seq", 0),
                 analysis_seq=d.get("analysis_seq", 0), history_seq=d.get("history_seq", 0),
                 view_seq=d.get("view_seq", 0))
-            return _Live(beats=legacy["beats"], beats_seq=d.get("beats_seq", 0),
-                         gate_awaiting=bool(d.get("gate_awaiting")), gate_pending=d.get("gate_pending"),
-                         version=blob["version"], activities=[_Frame(workspace=ws)])
+            return _Live(gate_awaiting=bool(d.get("gate_awaiting")), gate_pending=d.get("gate_pending"),
+                         version=blob["version"],
+                         activities=[_Frame(workspace=ws, beats=legacy["beats"],
+                                            beats_seq=d.get("beats_seq", 0))])
         view = legacy.get("view")                             # compose from legacy columns (pre-P1)
         ws = _Workspace(last_board=legacy["last_board"], last_analysis=legacy["last_analysis"],
                         last_tree=legacy["last_tree"], history=legacy.get("history") or [], view=view,
                         board_seq=legacy["board_seq"], tree_seq=legacy["tree_seq"],
                         analysis_seq=legacy["analysis_seq"], view_seq=(view or {}).get("seq", 0))
-        return _Live(beats=legacy["beats"], beats_seq=legacy["beats_seq"],
-                     activities=[_Frame(workspace=ws)])
+        return _Live(activities=[_Frame(workspace=ws, beats=legacy["beats"],
+                                        beats_seq=legacy["beats_seq"])])
 
     def _document_dict(self, c: _Live) -> dict:
         """The canonical Session Document (design §6 shape, P3): session-level fields + the activity
@@ -494,6 +550,7 @@ class StateStore:
             "drill_close": c.drill_close,
             "gate": {"awaiting": c.gate_awaiting, "pending": c.gate_pending},
             "activities": [_frame_to_dict(f) for f in c.activities],
+            "active_idx": c.active_idx,
         }
 
     def dump(self) -> dict:
@@ -502,17 +559,18 @@ class StateStore:
         c = self._cur
         return {**self._document_dict(c), "beats": list(c.beats), "session": self._current or None}
 
-    def _persist_view(self, new_beats: list | None = None) -> None:
+    def _persist_view(self) -> None:
         """Flush the current session document (P6: the ONE canonical blob — no more JSON files, no more
         decomposed columns). Bumps the monotonic `version` (in memory always, so it advances even with
-        no DB), then persists the whole document blob. `new_beats` (from append_beats) are written in
-        the SAME transaction as the document, so `beats_seq` and the beat rows never disagree."""
+        no DB), then persists the whole document. Beats ride ON their activity frame (per-activity
+        conversation), so `_save_activities` persists them in the SAME transaction as the document —
+        `beats_seq` and the beat rows never disagree."""
         with self._wlock:   # atomic bump (int += is read-modify-write; concurrent writers must not tear it)
             c = self._cur
             c.version += 1
             if self.db is None or not self._current:
                 return
-            self.db.save_document(self._current, self._document_dict(c), c.version, beats=new_beats)
+            self.db.save_document(self._current, self._document_dict(c), c.version)
 
     @property
     def _beats(self): return self._cur.beats
@@ -662,13 +720,26 @@ class StateStore:
 
     @property
     def top_kind(self) -> str:
-        """The kind of the live (top) activity — the session's current mode."""
+        """The kind of the active (in-view) activity — the session's current surface."""
         return self._cur.top.kind
 
+    @property
+    def active_idx(self) -> int:
+        """Which activity is currently in view (0 = base conversation)."""
+        return self._cur.active_idx
+
     def _republish(self) -> None:
-        """Tell the app to reset and re-render the CURRENT top frame's workspace — used after a
-        push/pop/set_base swaps which workspace is live (the wire is a projection of the top frame)."""
-        self._publish("reset", {})
+        """Re-render the CURRENT frame's workspace after an activity switch (push/open/finish/set_base).
+
+        We do NOT send a hard `reset` here: `reset` nulls the board on the client, which FLICKERS it
+        (blank → repaint) on every activity transition — and worse, a freshly PUSHED frame has no board
+        yet (the drill's `present` writes it a beat later), so the board would sit blank in between. The
+        snapshot fully re-specifies board/beats/history/view/activity/mode, so re-sending it REPLACES the
+        old frame's projection in place. The only thing a plain replace can't do is CLEAR a channel the
+        new frame lacks, so we explicitly clear the drill tree when this frame has none (else the old
+        frame's walker would linger and mis-adjudicate)."""
+        if self._last_tree is None:
+            self._publish("tree_cleared", {})
         for channel, payload in self.snapshot():
             self._publish(channel, payload)
 
@@ -678,23 +749,105 @@ class StateStore:
     _SEEDABLE = frozenset({"last_board", "last_analysis", "last_tree", "history", "drill_state",
                            "poisoned", "decorations"})
 
-    def push_activity(self, kind: str, *, seed: dict | None = None) -> None:
-        """Push a fresh activity frame (a rabbit-hole, design §7): the current top's workspace is
-        frozen in place on the stack, a new empty workspace becomes live. Session-level state (beats,
-        the Socratic gate, version) is CONTINUOUS across the push. A coach-supplied `seed` may set the
-        starting board/tree/history, but NEVER the UI-authored `view` — that field is stripped so a
-        push can't author the cursor (§8). Persists + re-renders the new frame."""
+    def active_frame_lesson_id(self) -> str:
+        """The drill id bound to the activity currently in view (empty for the base conversation)."""
+        return self._cur.activities[self._cur.active_idx].lesson_id
+
+    def reactivate_lesson(self, lesson_id: str) -> bool:
+        """Reopening a puzzle makes its drill LIVE again WITHOUT losing the player's work: bind the lesson
+        active to this chat (mode → coach) but keep its bit progress, and keep the frame's board/history/
+        view — the line played and the variations explored are PRESERVED, not reset. Clearing `meta` is
+        what lets `active_lesson` resolve it again (a solved drill has meta set). Returns True if it
+        reactivated a real lesson. Publishes the mode via save_lesson_progress."""
+        from ..coaching.lesson import ACTIVE
+        lesson = self.get_lesson(lesson_id)
+        if lesson is None:
+            return False
+        prog = lesson.progress
+        prog.meta = None                                   # so resolve_mode sees it as live again
+        prog.state = ACTIVE
+        prog.chat_id = self.current_sid                    # bound to THIS chat → resolve_mode = coach
+        self.save_lesson_progress(prog)                    # keep bits: the played line stays on the board
+        # Re-push the forcing tree so the reopened drill adjudicates on the CLIENT (like a fresh puzzle) —
+        # without it the client has no walker and moves fall back to the server. The tree lives on the
+        # lesson spec, so it survived the reload.
+        tree = next((b.params.get("tree") for b in lesson.spec.bits if (b.params or {}).get("tree")), None)
+        if tree:
+            self.write_tree(tree)
+        return True
+
+    def push_activity(self, kind: str, *, seed: dict | None = None, title: str = "",
+                      lesson_id: str = "") -> int:
+        """Open a fresh activity (design §7): append a new frame and move `active_idx` onto it — with
+        its OWN empty beat stream, so a puzzle activity is its own saved conversation. The frame the
+        player was on is frozen in place (NOT popped): it stays a sibling so a card can bring the player
+        back here later. The durable Socratic gate + version stay session-level. A coach-supplied `seed`
+        may set the starting board/tree/history, but NEVER the UI-authored `view` — that field is
+        stripped so a push can't author the cursor (§8). Persists + re-renders. Returns the new idx."""
         safe_seed = {k: v for k, v in (seed or {}).items() if k in self._SEEDABLE}
-        self._cur.activities.append(_Frame(kind=kind, workspace=_workspace_from_dict(safe_seed)))
+        self._cur.activities.append(
+            _Frame(kind=kind, workspace=_workspace_from_dict(safe_seed), title=title, lesson_id=lesson_id))
+        self._cur.active_idx = len(self._cur.activities) - 1
         self._persist_view()
         self._republish()
+        return self._cur.active_idx
+
+    def open_activity(self, idx: int) -> bool:
+        """Switch the in-view activity to `idx` (a card click reopening a saved puzzle, or `0` to go
+        back to the base conversation). No frame is removed — activities are re-openable siblings.
+        Out-of-range → False. Persists + re-renders the now-active frame's workspace + beats."""
+        if not (0 <= idx < len(self._cur.activities)):
+            return False
+        self._cur.active_idx = idx
+        self._persist_view()
+        self._republish()
+        return True
+
+    def finish_activity(self, *, status: str = ATTEMPTED_STATUS) -> bool:
+        """The player leaves the current activity (the puzzle's back button): stamp the frame's outcome,
+        switch the view back to the BASE conversation, and drop a `card` beat into the base referencing
+        the saved activity so the player can reopen it. No-op (False) when already on the base or the
+        active frame isn't a re-openable activity. The frame itself — its beats, board, variations — is
+        preserved for reopening."""
+        c = self._cur
+        if c.active_idx == 0:
+            return False
+        idx = c.active_idx
+        frame = c.activities[idx]
+        if frame.kind == "conversation":
+            return False
+        frame.status = frame.status or status  # a solved drill already stamped itself; don't downgrade it
+        c.active_idx = 0                       # back to the base conversation…
+        base = c.activities[0]
+        existing = next((b for b in base.beats
+                         if b.get("kind") == "card" and b.get("activity_idx") == idx), None)
+        if existing is None:
+            self.append_beats([{"kind": "card", "activity_idx": idx, "title": frame.title or "Puzzle",
+                                "activity_kind": frame.kind, "status": frame.status,
+                                "segments": [{"text": frame.title or "Puzzle"}]}])
+        else:
+            existing["status"] = frame.status  # a re-visit may have upgraded attempted → solved
+            self._persist_view()
+        self._republish()
+        return True
+
+    def mark_activity_solved(self) -> None:
+        """Stamp the active activity's frame `status=solved` (the deterministic solve moment), so its
+        card reads 'solved' even though the player hasn't left yet. No-op on the base conversation."""
+        c = self._cur
+        if c.active_idx == 0:
+            return
+        c.activities[c.active_idx].status = SOLVED_STATUS
+        self._persist_view()
 
     def pop_activity(self) -> bool:
-        """Resolve the top rabbit-hole: drop the top frame and restore the parent's frozen workspace.
-        Cannot pop past the base (returns False). Persists + re-renders the restored frame."""
+        """Legacy destructive pop (the parked what-if excursion): drop the top frame and restore the one
+        beneath. Distinct from the Activities feature, which keeps frames (finish_activity/open_activity).
+        Cannot pop past the base (False). Only valid when the active frame IS the last one."""
         if len(self._cur.activities) <= 1:
             return False
         self._cur.activities.pop()
+        self._cur.active_idx = min(self._cur.active_idx, len(self._cur.activities) - 1)
         self._persist_view()
         self._republish()
         return True
@@ -702,6 +855,7 @@ class StateStore:
     def set_base_activity(self, kind: str) -> None:
         """Replace the whole stack with a single base frame of `kind` (a deliberate home change)."""
         self._cur.activities = [_Frame(kind=kind)]
+        self._cur.active_idx = 0
         self._persist_view()
         self._republish()
 
@@ -1103,11 +1257,16 @@ class StateStore:
         # History goes out BEFORE the board: the app anchors board orientation on `history.first`, so if
         # the board arrived first it would briefly flip to the board's side-to-move (a black-to-move
         # position flashes upside-down) before history corrects it. History first = stable orientation.
-        evs.append(("history", {"schema": SCHEMA, "seq": self._history_seq, "plies": self._history}))
+        # COPY the mutable lists into the payload. `_publish` enqueues the payload and the WS sender
+        # serializes it LATER (async), so a live reference would capture mutations made between now and
+        # serialization. `append_beats` mutates `self._beats` IN PLACE, so an "empty" push snapshot could
+        # serialize with beats that were appended a beat later (present's challenge) — delivering it both
+        # here AND in its own delta = a duplicate. A shallow copy freezes the length at snapshot time.
+        evs.append(("history", {"schema": SCHEMA, "seq": self._history_seq, "plies": list(self._history)}))
         if self._last_board is not None:
             evs.append(("board", self._last_board))
         evs.append(("beats", {
-            "schema": SCHEMA, "seq": self._beats_seq, "beats": self._beats,
+            "schema": SCHEMA, "seq": self._beats_seq, "beats": list(self._beats),
             "cursor": self._beats[-1]["i"] if self._beats else 0,
         }))
         if self._last_analysis is not None:
@@ -1123,7 +1282,11 @@ class StateStore:
         evs.append(("sessions", self._sessions_payload()))
         # P5: the activity stack's shape for the app's breadcrumb (depth 1 = just the base, no
         # breadcrumb). Re-sent by _republish after every push/pop, so the breadcrumb updates live.
-        evs.append(("activity", {"depth": self.frame_depth, "kind": self.top_kind}))
+        evs.append(("activity", {"depth": self.frame_depth, "kind": self.top_kind,
+                                  "idx": self.active_idx}))
+        # The conversation mode (coach/freeform), so a (re)connecting app shows the drill header
+        # without waiting for the next lesson-state transition.
+        evs.append(("mode", self._mode_payload()))
         # P4a: a snapshot is a point-in-time full sync — every event carries the same current version,
         # so the app knows the version its replica is at before it starts consuming deltas.
         v = self._version
@@ -1173,6 +1336,25 @@ class StateStore:
         with self._wlock:   # ordered w.r.t. other publishes, so a `None` clear is never dropped as stale
             self._publish("status", {"schema": SCHEMA, "text": text})
 
+    # -- conversation mode (writer: the lesson bridge methods above) ----------
+    def _mode_payload(self) -> dict:
+        """The chat's conversation mode as a wire fact (resolve_mode made visible): a live lesson →
+        coach, else freeform — with `suspended` flagging a drill parked by a what-if excursion, and
+        the governing lesson's type so the app can title the drill ("Puzzle")."""
+        live = self.active_lesson()
+        lesson = live or self.suspended_lesson()
+        return {"schema": SCHEMA,
+                "mode": "coach" if live is not None else "freeform",
+                "suspended": live is None and lesson is not None,
+                "lesson_type": lesson.spec.type if lesson is not None else None}
+
+    def publish_mode(self) -> None:
+        """Push the current mode to the bound chat's sockets. Called after every lesson-state
+        mutation (activate / set_state / progress save) — the only places the mode can change —
+        so the app never has to infer the mode from side effects."""
+        with self._wlock:   # ordered w.r.t. other publishes, same as publish_status
+            self._publish("mode", self._mode_payload())
+
     # -- app->coach input (writer: app via submit_input; reader: read_input) --
     def set_input(self, data: dict) -> None:
         """Record the app's structured input (a played move / "done" / drill event). In-memory
@@ -1190,6 +1372,7 @@ class StateStore:
         session's seq-1 board). The MCP owns these files (single-writer safe);
         mastery memory under memory/ is untouched."""
         self._cur.activities = [_Frame()]     # reset the stack to a single clean base frame (P3)
+        self._cur.active_idx = 0              # …and re-point the view before any beats/board write below
         self._version = 0
         self._beats_seq = 0
         self._beats = []
@@ -1325,9 +1508,10 @@ class StateStore:
                 self._beats.append(b)
                 indices.append(b["i"])
             self._beats_seq += 1
-            # Persist the new beats + the document (with the bumped beats_seq) in ONE transaction, so a
-            # crash can't leave beats_seq ahead of the beat rows (or vice-versa).
-            self._persist_view(new_beats=self._beats[start:])
+            # Beats now live ON THE FRAME → they persist inside the document blob (per activity). We no
+            # longer write the `(session_id, i)` beat sidecar: per-activity beats restart at i=0, so a
+            # pushed activity's beat 0 would COLLIDE with the base's beat 0 there. The blob is atomic.
+            self._persist_view()
             self._publish("beats", {"schema": SCHEMA, "seq": self._beats_seq,
                                     "appended": self._beats[start:]})
         return indices

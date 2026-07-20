@@ -13,10 +13,10 @@ import contextvars
 
 from .bits import BitProgress
 from .grounding import (
-    _brief_move, _brief_reply, _created_threat, _deep_tactics, _draws_by_stalemate, _invented_moves,
-    _node_at, _node_solutions, _numbered, _solution_moves, _why_loses, tiered_bit_grounding,
-    you_move_beat)
-from ..reasoning import describe_plan, pv_san_to_uci, undermines_defender
+    _brief_move, _brief_reply, _created_threat, _deep_tactics, _draws_by_stalemate, _fallback_hint,
+    _hint_line, _invented_moves, _invented_motif, _node_at, _node_solutions, _numbered,
+    _solution_moves, _why_loses, tiered_bit_grounding, you_move_beat)
+from ..reasoning import attacks_defender, describe_plan, pv_san_to_uci, undermines_defender
 from .handler_base import HandlerBase
 from .lesson import ACTIVE, LessonProgress, puzzle_lesson_id, puzzle_spec
 from .loop import Handled, Open, Outcome, Suspend
@@ -81,6 +81,8 @@ class CoachHandler(HandlerBase):
             return Handled()
         if inp.kind == "move":
             return await self._adjudicate(lesson, bit, inp)
+        if inp.kind == "explain":                 # the player clicked "Why?" on a held wrong move
+            return await self._explain_move(bit, inp)
         if inp.kind == "continue":                # the player clicked Continue → walk the next branch
             return await self._continue_branch(lesson, bit)
         j = await self._gen_json(CoachTurnPrompt.system(bit),
@@ -138,26 +140,20 @@ class CoachHandler(HandlerBase):
         move_result.set({"drill": True, "correct": bool(correct), "finished": finished,
                          "await_continue": await_continue})
 
-        # Two beats on a correct mid-line move: (1) the verdict — what YOU did; (2) the opponent's
-        # auto-played reply — what THEY did. Independent grounding, so generate concurrently (one LLM
-        # round-trip, not two) and say in order. A wrong or line-ending move has no reply.
+        # v1 hot path: NO auto-generated verdict (the LLM does not interpret the move). A RIGHT move gets
+        # only the ✓ (the app adds a local, canned praise); a WRONG move gets only the ✗ + the app's Retry
+        # / on-demand "Why?" (which calls `explain` → today's wrong-move text). What still SPEAKS here is
+        # only game-progress, not interpretation: the opponent's auto-played reply, and the branch-solved
+        # continuation prompt. (See memory: LLM = learning harness, per-move explanation is v2.)
         player_color = _color_to_move(inp.fen) if inp.fen else None
         reply = (effects or {}).get("reply") if correct else None
         if reply:
-            vtext, rtext = await asyncio.gather(
-                self._verdict_text(inp, grounding, correct, player_color, bit),
-                self._reply_text(reply, player_color))
-            self._say(vtext, tone="praise")
-            self._say(rtext, tone="teach")
+            self._say(await self._reply_text(reply, player_color), tone="teach")
         elif await_continue:
             # Solved this branch — offer to walk the next sibling defence. The board STAYS on the
             # solution; the backtrack runs only when the player clicks Continue (→ inp.kind "continue").
-            self._say(await self._verdict_text(inp, grounding, correct, player_color, bit), tone="praise")
             self._say("That defence is handled — but your opponent has other tries. Continue?",
                       tone="teach")
-        else:
-            self._say(await self._verdict_text(inp, grounding, correct, player_color, bit),
-                      tone="praise" if correct else "correct")
 
         if new_prog.cleared:
             if finished:
@@ -165,6 +161,20 @@ class CoachHandler(HandlerBase):
             lesson.advance_currentBit()
             self.store.save_lesson_progress(lesson.progress)
             await self._present_bit(lesson.current_bit())
+        return Handled()
+
+    async def _explain_move(self, bit, inp) -> Outcome:
+        """On-demand 'Why?' for a WRONG move. v1 no longer auto-shows the verdict; this regenerates the
+        SAME wrong-move explanation on demand (the refutation-line 'why' — `_move_facts` wrong branch →
+        `_WRONG` prompt). The wrong move is still HELD on the board, so fen + uci + the current bit are
+        intact. LLM outage degrades to a plain, grounded sentence (never breaks the click)."""
+        if not inp.fen or not inp.uci:
+            return Handled()
+        if inp.san is None:
+            inp.san = self.ground.san_of(inp.fen, inp.uci) or None
+        grounding = await self._ground_for_bit(bit)
+        text = await self._verdict_text(inp, grounding, False, _color_to_move(inp.fen), bit)
+        self._say(text, tone="correct")
         return Handled()
 
     async def _continue_branch(self, lesson, bit) -> Outcome:
@@ -191,6 +201,7 @@ class CoachHandler(HandlerBase):
     async def _conclude(self, lesson) -> Outcome:
         lesson.mark_solved()                       # WRITE-ONCE
         self.store.save_lesson_progress(lesson.progress)
+        self.store.mark_activity_solved()          # stamp THIS puzzle's frame so its card reads "solved"
         self._bank_mastery(lesson)                 # dormant hook (mastery not wired today)
         self._say("Solved — nicely done.", tone="praise")
         # §5 moment 3: the REVEAL is a reveal_on_resolve fact surfaced through §4's tiered grounding —
@@ -215,14 +226,30 @@ class CoachHandler(HandlerBase):
     async def enter(self, outcome) -> bool:
         """Create or resume a Lesson and ACTIVATE it in THIS chat (no beats — the loop re-routes a
         synthetic `present` so the entry action runs in the awaited flow). Returns True if a lesson is
-        now active, False otherwise (not drillable / failed → loop stays in freeform). LLD §8 seam."""
+        now active, False otherwise (not drillable / failed → loop stays in freeform). LLD §8 seam.
+
+        On success we PUSH a fresh activity for the drill: the puzzle becomes its own saved surface
+        (its own board/beats/variations), transitioned INTO visually and re-openable later from a card
+        in the base conversation. The re-routed `present` then writes the challenge into this frame."""
         src = outcome.source or {}
         if src.get("kind") == "resume" and src.get("lesson_id"):
             if self.store.get_lesson(src["lesson_id"]) is None:
                 return False
             self.store.activate_lesson(src["lesson_id"])      # binds state=active + this chat_id
-            return True
-        return await self._create_from_current(outcome)
+        elif not await self._create_from_current(outcome):
+            return False
+        self._open_activity_for_lesson()
+        return True
+
+    def _open_activity_for_lesson(self) -> None:
+        """Open the drill's own activity frame. Kind is the lesson type (puzzle/endgame/…) so the app
+        transitions to the right specialized surface; the title labels its card in the base conversation.
+        The lesson id is bound to the frame so a card REOPEN can make the drill live again."""
+        live = self.store.active_lesson()
+        kind = (live.spec.type if live else "puzzle") or "puzzle"
+        self.store.push_activity(kind, title=kind.capitalize(),
+                                 lesson_id=(live.spec.id if live else ""))
+
 
     async def _create_from_current(self, outcome) -> bool:
         """Wrap the CURRENT position as a one-bit puzzle Lesson: reuse the paste-time-cached spec if
@@ -267,6 +294,8 @@ class CoachHandler(HandlerBase):
         if root_fen:
             self.store.write_history([{"n": 0, "san": None, "uci": None, "fen": root_fen}])
             self.store.write_board(root_fen)
+        if tree.get("root") or tree.get("fen"):
+            self.store.write_tree(tree)   # push the tree so the CLIENT adjudicates (sole authority)
         self._say(bit.spec.challenge or "Find the best continuation here.", tone="teach", stops=True)
         if tree.get("has_poisoned_line"):
             warn = tiered_bit_grounding(None, tree).warn_text()
@@ -307,12 +336,13 @@ class CoachHandler(HandlerBase):
         usr = VerdictPrompt.prompt(attempt=attempt, facts=facts)
         # DETERMINISTIC GUARD (prompt rules alone didn't hold): reject any verdict that NAMES a move
         # not in the facts / not the move played — flash-lite kept inventing one (a promotion as "Kb2",
-        # a rook dance as "Ra4# mate"). Regenerate once; if it invents again, fall back to a move-free
-        # sentence so a hallucinated move never reaches the player.
+        # a rook dance as "Ra4# mate") — OR names a tactical MOTIF ('a fork') the facts never gave.
+        # Regenerate once; if it invents again, fall back to a move-free sentence so a hallucination
+        # never reaches the player.
         for _ in range(2):
             out = await self._gen_json(sys, usr)
             text = out.get("text") or ""
-            if text and not _invented_moves(text, facts, inp.san):
+            if text and not _invented_moves(text, facts, inp.san) and not _invented_motif(text, facts):
                 return text
         return self._safe_verdict(correct, facts)
 
@@ -364,9 +394,15 @@ class CoachHandler(HandlerBase):
             # names the un-played next move.
             pre, post = await asyncio.gather(_an(inp.fen), _an(after_fen))
             verdict = {k: v for k, v in verdict.items() if k != "refutation_pv"}   # a best move has none
-            move_read = _brief_move(verdict, hide_best=False)
+            move_read = _brief_move(verdict, hide_best=False, live_fen=after_fen)
             positional = "\n".join(str(x) for x in getattr(grounding, "always", []) or [])
-            created = _created_threat((post or {}).get("analysis") or [], sols)
+            # Solution-stripping hides the UN-PLAYED continuation. But the PLAYED move is already on the
+            # board, so a fact naming IT ('forced mate in 4 — it starts with c4+') is not a spoiler and
+            # MUST survive — stripping it left the point as an irrelevant background pin/defender. Drop
+            # the played move from the solution set for these reads; the future line stays hidden.
+            played = (inp.san or "").rstrip("+#")
+            future_sols = [s for s in sols if (s or "").rstrip("+#") != played]
+            created = _created_threat((post or {}).get("analysis") or [], future_sols)
             # THE POINT, most-causal first: the MULTI-PLY plan (walk the engine PV → the target the move
             # actually wins, verified, not just "threatened"), then the single-ply undermine motif, then
             # the static deep-tactics defender fact. The plan speaks the PLAYED line, so trust it only
@@ -375,9 +411,13 @@ class CoachHandler(HandlerBase):
             pv_ucis = pv_san_to_uci(inp.fen, (verdict.get("best") or {}).get("pv_san"))
             plan = (describe_plan(inp.fen, pv_ucis, (verdict.get("eval") or {}).get("cp"))
                     if pv_ucis and pv_ucis[0] == inp.uci else None)
-            point = (plan
+            # The attack-the-defender FORK ('can't save both') outranks the multi-ply plan: when the move
+            # only THREATENS the guard, the plan would over-certainly report the single line where the
+            # opponent concedes one particular piece, hiding that it's the opponent's choice.
+            point = (attacks_defender(inp.fen, inp.uci)
+                     or plan
                      or undermines_defender(inp.fen, inp.uci)
-                     or _deep_tactics((pre or {}).get("analysis") or [], sols))
+                     or _deep_tactics((pre or {}).get("analysis") or [], future_sols, live_fen=after_fen))
             # Point FIRST — it is the reason the move is the move; the capture read and the generic
             # positional context are secondary and must not become the lead.
             return "\n".join(p for p in (point, move_read, created, positional or None) if p)
@@ -396,10 +436,22 @@ class CoachHandler(HandlerBase):
         # move; the mechanism itself is derived regardless. Anchor on inp.fen (a wrong move can be deep
         # in a multi-ply drill), and count the solutions AT that node.
         sol_moves = _node_solutions(_node_at(tree, inp.fen))
+        single = (len(sol_moves) == 1)
         why = (_draws_by_stalemate(inp.fen, inp.uci, verdict.get("refutation_pv"))
                or _why_loses(inp.fen, inp.uci, verdict.get("refutation_pv"),
-                             solution_ucis=sol_moves, single_solution=(len(sol_moves) == 1)))
-        return "\n".join(p for p in (move_read, created, why) if p)
+                             solution_ucis=sol_moves, single_solution=single))
+        # A graduated Socratic HINT — DRILL only (a retry loop exists), escalating by prior wrong tries.
+        # `get_hints` reuses the position's cached analysis; the ladder is answer-preserving by
+        # construction (never the move). When the ladder is empty (a win outside its tactical scope),
+        # fall back to a target nudge — but only from the SECOND miss on, so a first try still stands
+        # alone. Quiet/positional bests yield neither → the prompt asks a plain question instead.
+        hint = None
+        if bit is not None and getattr(bit, "progress", None) is not None:
+            attempts = bit.progress.attempts
+            hres = await asyncio.to_thread(self.ground.get_hints, inp.fen)
+            hint = (_hint_line((hres or {}).get("hints"), attempts)
+                    or (_fallback_hint(inp.fen, verdict) if attempts >= 1 else None))
+        return "\n".join(p for p in (move_read, created, why, hint) if p)
 
     @staticmethod
     def _after_fen(fen: str | None, uci: str | None) -> str | None:
