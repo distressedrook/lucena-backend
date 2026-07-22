@@ -9,7 +9,7 @@ drill.py / drill_feedback.py elsewhere in this package.
 
 from __future__ import annotations
 
-from lucena_engine import openings   # pure table lookups: no engine process, no I/O per call
+from lucena_core import openings   # pure table lookups: no engine process, no I/O per call
 
 # -- book routing ---------------------------------------------------------------------------------
 # The three freeform book-voice routes (plus _COACH, the fall-through — see orchestrator.py, which

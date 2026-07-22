@@ -13,7 +13,7 @@ from __future__ import annotations
 import threading
 
 from lucena_engine.evalmodel import win_pct_from_score
-from lucena_engine import openings
+from lucena_core import openings
 from .response import pv_san
 
 

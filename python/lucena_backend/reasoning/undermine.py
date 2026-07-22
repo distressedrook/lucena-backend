@@ -17,7 +17,7 @@ Attack-the-defender is a FORK: the opponent saves the guard OR the piece it defe
   REMOVE (sacrifice) — you gave material specifically to strip the defender, so the now-undefended
            victim is the point.
 """
-from lucena_engine.board import Board
+from lucena_core.board import Board
 
 from ._pieces import value, word
 

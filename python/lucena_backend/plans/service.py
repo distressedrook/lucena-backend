@@ -21,7 +21,7 @@ import os
 import sys
 from pathlib import Path
 
-from lucena_engine.board import Board
+from lucena_core.board import Board
 
 from .rolls import roll_engine, roll_maia
 

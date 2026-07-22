@@ -21,7 +21,7 @@ if not os.environ.get("LUCENA_MAIA") and (_ROOT / ".venv-maia/bin/python").exist
     os.environ["LUCENA_MAIA"] = (f"{_ROOT}/.venv-maia/bin/python "
                                  f"{_ROOT}/engine/scripts/maia_policy_uci.py")
 
-from lucena_engine import openings                      # noqa: E402
+from lucena_core import openings                      # noqa: E402
 from ..engine_io.enginepool import EnginePool           # noqa: E402
 from .service import is_endgame, sheet_for, PLANS_CP_BAND  # noqa: E402
 

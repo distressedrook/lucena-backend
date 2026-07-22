@@ -30,7 +30,7 @@ class _StubLLM:
 
 @pytest.fixture
 def engine_server():
-    from lucena_engine.server.serve import build_server
+    from lucena_core.server.serve import build_server
     server, engines = build_server(port=50356, threads=1)
     server.start()
     yield "localhost:50356"

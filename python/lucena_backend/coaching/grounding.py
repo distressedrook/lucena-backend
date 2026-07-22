@@ -151,7 +151,7 @@ def _pv_capture_victims(fen: str | None, played_san: str | None, pv: list) -> li
     if not fen:
         return [None] * len(pv)
     try:
-        from lucena_engine.board import Board
+        from lucena_core.board import Board
         b = Board(fen)
         if played_san is not None:
             played = next((m for m in b.legal_moves() if b.san(m) == played_san), None)
@@ -349,7 +349,7 @@ def _legal_sans(fen: str | None) -> set[str] | None:
     if not fen:
         return None
     try:
-        from lucena_engine.board import Board
+        from lucena_core.board import Board
         b = Board(fen)
         return {b.san(u).rstrip("+#") for u in b.legal_moves()}
     except Exception:
@@ -441,7 +441,7 @@ def _fallback_hint(pre_fen: str | None, verdict: dict) -> str | None:
     if not best_san or not pre_fen:
         return None
     try:
-        from lucena_engine.board import Board
+        from lucena_core.board import Board
         b = Board(pre_fen)
         dest = b.uci(best_san)[2:4].lower()
         target = next((p for p in b.piece_list()
@@ -505,7 +505,7 @@ def _draws_by_stalemate(pre_fen: str | None, uci: str | None, pv: list) -> str |
     if not pre_fen or not uci:
         return None
     try:
-        from lucena_engine.board import Board
+        from lucena_core.board import Board
         start = Board(pre_fen)
         played = next((start.san(m) for m in start.legal_moves() if m == uci), None)
         if played is None:
@@ -601,7 +601,7 @@ def _why_loses(pre_fen: str | None, uci: str | None, pv: list, solution_ucis: li
         return None                                   # only a capture refutation loses material this way
     sq = refute.rstrip("+#")[-2:]
     try:
-        from lucena_engine.board import Board
+        from lucena_core.board import Board
         b = Board(pre_fen)
         after = b.apply(uci)
         from_sq, dest = uci[:2].lower(), uci[2:4].lower()
@@ -806,7 +806,7 @@ def you_move_beat(pre_fen: str | None, uci: str | None, san: str | None,
     after_fen = None
     if pre_fen and uci:
         try:
-            from lucena_engine.board import Board
+            from lucena_core.board import Board
             after_fen = Board(pre_fen).apply(uci).fen
         except Exception:
             after_fen = None

@@ -24,7 +24,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
-from lucena_engine.board import Board
+from lucena_core.board import Board
 from .statefile import write_state
 
 SCHEMA = 1

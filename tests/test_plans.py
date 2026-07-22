@@ -57,7 +57,7 @@ def test_roll_maia_gate_and_determinism():
         """Board-agnostic policy: always prefer the first legal move, with one
         contested rival — exercises the 40-60 gate without a real model."""
         def top_human_moves(self, fen, rating, *, n=5):
-            from lucena_engine.board import Board
+            from lucena_core.board import Board
             legal = Board(fen).legal_moves()
             rows = [{"uci": legal[0], "rank": 1, "policy": 0.5}]
             if len(legal) > 1:

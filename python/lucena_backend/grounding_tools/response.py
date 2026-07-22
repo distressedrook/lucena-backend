@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 
-from lucena_engine.board import Board
+from lucena_core.board import Board
 from lucena_engine.evalmodel import Score, win_pct_from_score
 
 MAX_TOKENS = 400   # per-response ceiling; raised from 300 to fit the positional read

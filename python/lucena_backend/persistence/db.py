@@ -23,8 +23,8 @@ import threading
 import psycopg
 from psycopg.types.json import Jsonb
 
-from lucena_engine.board import Board
-from lucena_engine._fen import norm_fen
+from lucena_core.board import Board
+from lucena_core._fen import norm_fen
 
 SCHEMA_VERSION = 8               # 8: accounts — app_user, auth_token, session.user_id
 _BOARD_SCHEMA = 1                # matches state.SCHEMA (the board object's "schema" field)

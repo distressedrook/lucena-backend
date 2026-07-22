@@ -21,7 +21,7 @@ Two guards keep it honest, because a piece merely *touched* in the line is not a
       rarer "even on the board but the position is lost": require the engine to agree the mover is at
       least clearly better (≥ +100 mover-POV), no more.
 """
-from lucena_engine.board import Board
+from lucena_core.board import Board
 
 from ._pieces import word
 

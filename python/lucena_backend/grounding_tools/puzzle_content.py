@@ -17,7 +17,7 @@ import json
 import os
 from pathlib import Path
 
-from lucena_engine.board import Board
+from lucena_core.board import Board
 
 # Lichess theme token -> domain concept id. Used both to pick the
 # `concept_id` build_and_arm_drill banks on solve AND to bias adaptive selection toward the

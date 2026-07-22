@@ -23,15 +23,15 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext as _nullcontext
 from dataclasses import dataclass, field
 
-from lucena_engine.board import Board
+from lucena_core.board import Board
 from lucena_engine.brilliant import is_brilliant
 from lucena_engine.uci import EngineError
 from lucena_engine.evalmodel import Glyph, Score, classify, win_pct_from_score
 from lucena_engine.analysis import assemble_analysis
-from lucena_engine.facts import build_fact_sheet
-from lucena_engine.hints import derive_hints
+from .facts import build_fact_sheet
+from .hints import derive_hints
 from lucena_engine.line_tree import build_line_tree, count_leaves
-from lucena_engine.positional import analyze_positional
+from lucena_core.positional import analyze_positional
 from . import puzzle_content
 from . import response as R
 from ..engine_io.enginepool import SingleEnginePool
@@ -1876,7 +1876,7 @@ class ToolContext:
         by the runner BEFORE the model runs, so the model only ever interprets a board that a
         parser — not the LLM — put there. Not gated: a fresh pasted position starts a new context.
         Returns {found: 'fen'|'pgn'|None, ...}."""
-        from lucena_engine.detect import detect_fens, detect_pgn
+        from lucena_core.detect import detect_fens, detect_pgn
         fens = detect_fens(text or "")
         if fens:
             fen = fens[0]

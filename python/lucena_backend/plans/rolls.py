@@ -30,7 +30,7 @@ import hashlib
 import os
 import random
 
-from lucena_engine.board import Board
+from lucena_core.board import Board
 
 MAIN_NODES = int(os.environ.get("LUCENA_PLANS_MAIN_NODES", 1_000_000))
 EXT_NODES = int(os.environ.get("LUCENA_PLANS_EXT_NODES", 250_000))

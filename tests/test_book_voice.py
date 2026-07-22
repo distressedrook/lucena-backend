@@ -12,8 +12,8 @@ from lucena_backend.coaching.book_voice import (
     _book_route, _is_swing, _NARRATE, _ENDBOOK, _COACH, _OFF_BOOK_AT, _MIN_FAMILY_SIZE,
 )
 from lucena_backend.coaching.freeform import _mover
-from lucena_engine.board import Board
-from lucena_engine import openings
+from lucena_core.board import Board
+from lucena_core import openings
 
 
 def _fens(*ucis: str) -> list:

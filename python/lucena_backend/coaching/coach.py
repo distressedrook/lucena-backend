@@ -41,7 +41,7 @@ def _normalize_promotion(fen: str | None, uci: str | None) -> str | None:
     if not fen or not uci or len(uci) != 4:
         return uci
     try:
-        from lucena_engine.board import Board
+        from lucena_core.board import Board
         src, dst_rank = uci[:2], uci[3]
         if dst_rank not in ("1", "8"):
             return uci
@@ -457,7 +457,7 @@ class CoachHandler(HandlerBase):
     def _after_fen(fen: str | None, uci: str | None) -> str | None:
         """The FEN after `uci` is played on `fen` — the board the move CREATES, for reading the threat
         it makes. Deterministic (a board apply, no engine). None if the move can't be applied."""
-        from lucena_engine.board import Board
+        from lucena_core.board import Board
         try:
             return Board(fen).apply(uci).fen
         except Exception:

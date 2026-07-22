@@ -28,9 +28,9 @@ import shutil
 
 import pytest
 
-from lucena_engine import Board
+from lucena_core import Board
 from lucena_engine import Engine
-from lucena_engine.pgn import parse_pgn, Game, Ply, PgnError
+from lucena_engine.pgn import parse_pgn, Game, Ply, PgnError  # stays engine-side until gamepass moves (migration Phase 5)
 from lucena_engine.gamepass import run_pass
 from lucena_backend.persistence.statefile import write_state
 
