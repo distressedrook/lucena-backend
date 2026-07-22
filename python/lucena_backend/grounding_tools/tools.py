@@ -24,13 +24,13 @@ from contextlib import contextmanager, nullcontext as _nullcontext
 from dataclasses import dataclass, field
 
 from lucena_core.board import Board
-from lucena_engine.brilliant import is_brilliant
+from .brilliant import is_brilliant
 from lucena_engine.uci import EngineError
 from lucena_engine.evalmodel import Glyph, Score, classify, win_pct_from_score
-from lucena_engine.analysis import assemble_analysis
+from .analysis import assemble_analysis
 from .facts import build_fact_sheet
 from .hints import derive_hints
-from lucena_engine.line_tree import build_line_tree, count_leaves
+from .line_tree import build_line_tree, count_leaves
 from lucena_core.positional import analyze_positional
 from . import puzzle_content
 from . import response as R

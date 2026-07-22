@@ -34,7 +34,7 @@ import pytest
 from lucena_core import Board
 from lucena_engine import Engine, Score
 from lucena_backend.grounding_tools.facts import Fact
-from lucena_engine.gamepass import run_pass
+from lucena_backend.pipelines.gamepass import run_pass
 from lucena_backend.grounding_tools import response as R
 from lucena_backend.persistence.state import StateStore
 from lucena_backend.persistence.statefile import write_state
