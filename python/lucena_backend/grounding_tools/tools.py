@@ -32,10 +32,26 @@ from lucena_engine.facts import build_fact_sheet
 from lucena_engine.hints import derive_hints
 from lucena_engine.line_tree import build_line_tree, count_leaves
 from lucena_engine.positional import analyze_positional
-from lucena_engine import poisoned_line_detector as _poisoned_line_detector
 from . import puzzle_content
 from . import response as R
 from ..engine_io.enginepool import SingleEnginePool
+
+# poisoned_line_detector moved from lucena_engine to lucena-tactics (2026-07-22):
+# lucena-engine stays thin, license-neutral infrastructure; the detector is
+# differentiated coaching logic and lives in a private repo now, alongside the
+# rest of the tactical-mistake vocabulary. Same sibling-repo bootstrap
+# convention as lucena_backend.plans._bootstrap() (append, never prepend, so
+# nothing in the backend's own env can be shadowed); LUCENA_TACTICS_DIR
+# overrides the location.
+import sys as _sys
+from pathlib import Path as _Path
+_TACTICS_DIR = _Path(os.environ.get(
+    "LUCENA_TACTICS_DIR",
+    str(_Path(__file__).resolve().parents[4] / "lucena-tactics")))
+_TACTICS_SRC = str(_TACTICS_DIR / "src")
+if _TACTICS_SRC not in _sys.path:
+    _sys.path.append(_TACTICS_SRC)
+import poisoned_line_detector as _poisoned_line_detector  # noqa: E402
 
 # The Stockfish leased to the current guarded call, and that call's nesting depth. Both are
 # ContextVars, not fields: a field would be shared by every chat running concurrently, which is the
