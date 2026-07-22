@@ -4,7 +4,7 @@
 lucena-plans (verify/fact_sheet/suggest) never rolls: it takes engine PVs
 and Maia rollouts as arguments and only checks lines. The research repo
 produces them by shelling to chess-lab's venv and a docker pipe
-(lucena-plans/experiments/tools/rolls.py); HERE the backend produces the
+(lucena-plans/research/experiments/tools/rolls.py); HERE the backend produces the
 same shapes from what it already owns — a leased pool Engine and the
 in-process MaiaEngine. No subprocesses, no gRPC.
 

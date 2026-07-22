@@ -8,7 +8,7 @@ that need chess logic live here (`is_endgame`) or in lucena_engine
 (`openings.name_for` for the book gate).
 
 lucena-plans is imported from its superrepo checkout (a sibling of
-backend/), not installed into the venv — it is a flat-module repo whose
+backend/), not installed into the venv — its src/ dir holds flat modules whose
 top-level names (suggest, verify, fact_sheet, ...) we only want on the
 path deliberately, appended (never prepended) so nothing in the backend's
 own environment can be shadowed. `LUCENA_PLANS_DIR` overrides the
@@ -50,7 +50,7 @@ def _plans_dir() -> Path:
 
 
 def _bootstrap() -> None:
-    d = str(_plans_dir())
+    d = str(_plans_dir() / "src")   # src layout (2026-07-22 restructure)
     if d not in sys.path:
         sys.path.append(d)          # append: never shadow backend deps
 
