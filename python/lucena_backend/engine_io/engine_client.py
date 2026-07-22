@@ -8,8 +8,8 @@ from __future__ import annotations
 import grpc
 from google.protobuf.json_format import MessageToDict
 
-from ._pb import engine_pb2 as pb
-from ._pb import engine_pb2_grpc as pbg
+from lucena_core._pb import engine_pb2 as pb   # ONE stub copy — core owns the proto (2026-07-23)
+from lucena_core._pb import engine_pb2_grpc as pbg
 
 _DEFAULT_TARGET = "localhost:50051"
 
