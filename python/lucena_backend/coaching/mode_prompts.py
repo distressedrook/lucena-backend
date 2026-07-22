@@ -5,6 +5,7 @@ built here, never hand-assembled in the handlers.
 
   - FreeformPrompt      classify + answer a free-chat turn (dual-role)
   - ReadPrompt          grounded read of a quiet position / a move-explain
+  - PlansReadPrompt     narrates the lucena-plans fact sheet (equalish out-of-book middlegame)
   - CoachTurnPrompt     classify a coach-mode text turn
   - VerdictPrompt       coach feedback on a bit answer — symmetric (right AND wrong)
   - PositionQueryPrompt answer a player's QUESTION about the current position (both modes)
@@ -105,6 +106,66 @@ class ReadPrompt:
     def prompt(cls, *, facts: str, played: str | None = None) -> str:
         head = f"{played} was just played.\n" if played else ""
         return f"{head}Grounded facts (read ONLY from these):\n{facts}\n\nRespond as JSON."
+
+
+class PlansReadPrompt:
+    """Narrates a lucena-plans FACT SHEET for a quiet, equalish, out-of-book MIDDLEGAME position
+    (the plans-layer route in freeform `_on_position`). The sheet is pre-grounded end-to-end —
+    assessment, structure, weaknesses are board geometry; the PLAN sections are verified against
+    engine lines rolled from THIS position — so the model's whole job is translation, zero chess.
+    Output: {text}."""
+
+    _TIERS = (
+        "The fact sheet has two reliability tiers — keep them distinct:\n"
+        "- PLAN FOR WHITE / PLAN FOR BLACK has been checked against real engine analysis for this "
+        "exact position. Treat these as confirmed; make them the heart of your explanation.\n"
+        "- Everything else (assessment, position read, structure, weaknesses) is true board "
+        "geometry, but not individually engine-checked — don't imply a listed weakness is "
+        "currently winning or forcing unless a PLAN says so.\n"
+    )
+    _RULES = (
+        "Every fact is labeled for a specific side; a WEAKNESSES FOR X item is a liability for X, "
+        "never an asset — don't invert it. Don't invent anything not stated (piece locations, "
+        "moves, tactics, threats, evaluations). Plain words only: no centipawns, win%, or internal "
+        "jargon, and never mention the position id or the fact sheet itself.\n"
+    )
+    # The player-requested layout (2026-07-22): fixed sections, each under its own bold heading.
+    # The THEORY section is the one place the model may speak from its own knowledge — and only
+    # about the structure the sheet NAMES (the same carve-out as opening narration: ideas and
+    # typical plans, never concrete lines, evals, or verdicts of its own).
+    _SHAPE = (
+        "FORMATTING: bold (**…**) for headings/emphasis and \"- \" bullets only — no markdown "
+        "headers (#), links, code, or nested lists.\n"
+        "Write the read as SECTIONS, each under a bold heading on its own line, in exactly this "
+        "order:\n"
+        "**Summary** — the assessment and the character of the position from the POSITION READ, in "
+        "1-2 sentences.\n"
+        "**White's Weaknesses** — the WEAKNESSES FOR WHITE items as short bullets. If the sheet "
+        "lists none, one line: nothing significant.\n"
+        "**Black's Weaknesses** — same, from WEAKNESSES FOR BLACK.\n"
+        "**White's Plans** — the PLAN FOR WHITE items as bullets, each in plain coaching words, "
+        "keeping any timing the sheet gives (now vs longer-term).\n"
+        "**Black's Plans** — same, from PLAN FOR BLACK.\n"
+        "**The Structure** — ONLY if the sheet's STRUCTURE line names one: 2-3 sentences of "
+        "standard textbook understanding of that named structure from your own knowledge — the "
+        "typical ideas and plans for each side, and connect them to the plans above where they "
+        "agree. Omit the whole section (heading included) when no structure is named.\n"
+        'Return JSON: {"text": string}.'
+    )
+
+    @classmethod
+    def system(cls) -> str:
+        return ("You are a chess coach reading a middlegame position on a shared analysis "
+                "board. Below you'll get a FACT SHEET for it — your only source; you have no board "
+                "or engine access. The sheet's ASSESSMENT line includes the position's CHARACTER "
+                "(quiet / lively / sharp...) with its evidence — let that set your tone: a sharp "
+                "equal position is not 'calm', it is a knife edge.\n"
+                + cls._TIERS + cls._RULES + _perspective(freeform=True)
+                + cls._SHAPE)
+
+    @classmethod
+    def prompt(cls, *, sheet: str) -> str:
+        return f"FACT SHEET (read ONLY from this):\n{sheet}\n\nRespond as JSON."
 
 
 class CoachTurnPrompt:

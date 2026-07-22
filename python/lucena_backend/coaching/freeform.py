@@ -11,16 +11,20 @@ Output is two channels: beats via the store; an `Outcome` returned to the loop.
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from lucena_engine import openings
 
+from .. import plans as _plans
 from .book_voice import (_BOOK_RATING, _BOOK_REPLIES, _COACH, _ENDBOOK, _NARRATE, _book_route, _is_swing)
 from .grounding import _brief, _brief_move, _numbered
 from .handler_base import HandlerBase
 from .lesson import puzzle_spec
 from .loop import EnterCoach, Handled, Outcome
-from .mode_prompts import FreeformPrompt, PositionQueryPrompt, ReadPrompt
+from .mode_prompts import FreeformPrompt, PlansReadPrompt, PositionQueryPrompt, ReadPrompt
 from .prompts import EndbookPrompt, NarratePrompt
+
+_log = logging.getLogger(__name__)
 
 
 def _mover(fen) -> str:
@@ -46,18 +50,54 @@ class FreeformHandler(HandlerBase):
         # Set the board deterministically (FEN detection lives in set_board_from_paste).
         await asyncio.to_thread(self.ctx.set_board_from_paste, inp.fen or inp.text or "")
         fen = self.store.board_view
-        # A DRILLABLE paste IS a puzzle → lay it out and go STRAIGHT to coach mode (no nudge). Cache the
-        # computed spec so coach entry reuses the tree instead of rebuilding.
+        # THE PASTE ROUTE (2026-07-22): drillable → coach; in book → the lucena-engine grounded read
+        # (the facts carry the opening name — the book prompt arm is a later build); quiet + out of
+        # book + MIDDLEGAME + equalish (|eval| <= 1.5) → the PLANS layer (lucena-plans fact sheet
+        # narrated by PlansReadPrompt); everything else → the plain grounded read (rest built later).
         preview = await asyncio.to_thread(self.ctx.preview_drill, fen)
         if isinstance(preview, dict) and preview.get("drillable"):
             self.store.save_lesson_spec(puzzle_spec(fen, preview["tree"]))
             return EnterCoach(type="puzzle", source={"kind": "current"})
+        if not openings.name_for(fen) and (text := await self._plans_read(fen)):
+            self._say(text)
+            return Handled()
         # A quiet (non-forcing) position → a freeform grounded read.
         facts = await self._ground(fen)
         out = await self._gen_json(ReadPrompt.system(),
                                    ReadPrompt.prompt(facts=_brief(facts)))
         self._say(out.get("text") or "Let's take a look at this position.")
         return Handled()
+
+    async def _plans_read(self, fen) -> str | None:
+        """The PLANS layer: for a quiet, out-of-book MIDDLEGAME position inside the equalish band
+        (|eval| <= 1.5 pawns — the zone where 'find a tactic' has no answer and the coaching value
+        is a plan), roll engine lines from this position, hand (fen, pvs, rolls) to lucena-plans'
+        fact sheet, and narrate it. Returns None when any gate fails or the layer errors — the
+        caller falls back to the plain grounded read; this path must never break the turn."""
+        if not fen or _plans.is_endgame(fen):
+            return None
+        # The eval gate reads the same cached analyse the fallback's _ground would run (focus="eval"
+        # skips the fact sheet), so gating costs one search total either way.
+        probe = await asyncio.to_thread(self.ground.analyze_and_show, fen,
+                                        focus="eval", board_push=False)
+        cp = ((probe or {}).get("eval") or {}).get("cp")
+        if cp is None or abs(cp) > _plans.PLANS_CP_BAND:
+            return None
+        try:
+            # The sanctioned out-of-tool lease (ToolContext.engine's own guidance): the roll is a
+            # multi-search read on the ground pool, not a guarded tool call. The Maia leg is ALWAYS
+            # on when Maia is configured (user ruling 2026-07-22: "Maia should never be off" —
+            # human-typicality is part of the product, latency paid); verify degrades to the engine
+            # leg only when the process has no MaiaEngine at all (LUCENA_MAIA unset).
+            sheet, _pid = await asyncio.to_thread(
+                _plans.sheet_for, fen, self.ground._pool, self.ctx.maia)
+        except Exception:  # noqa: BLE001 — a missing checkout / engine hiccup degrades, never breaks
+            _log.warning("plans layer unavailable; falling back to plain read", exc_info=True)
+            return None
+        out = await self._gen_json(PlansReadPrompt.system(),
+                                   PlansReadPrompt.prompt(sheet=sheet),
+                                   max_tokens=800)   # six headed sections need the headroom
+        return (out or {}).get("text")
 
     async def _on_move(self, inp) -> Outcome:
         pre_fen = inp.fen or self.store.board_view

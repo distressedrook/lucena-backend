@@ -27,14 +27,15 @@ class HandlerBase:
         self.model = model
         self._llm = llm
 
-    async def _gen_json(self, system: str, prompt: str) -> dict:
+    async def _gen_json(self, system: str, prompt: str, *, max_tokens: int = 400) -> dict:
         if os.environ.get("LUCENA_DEBUG_PROMPT"):
             print(f"\n===== LLM PROMPT =====\n--- SYSTEM ---\n{system}\n\n--- USER ---\n{prompt}\n"
                   f"======================", flush=True)
         try:
             comp = await self._llm.generate(
                 [Message("system", system), Message("user", prompt)],
-                GenerateOptions(model=self.model, schema=_JSON_OBJECT, max_tokens=400, temperature=0.4))
+                GenerateOptions(model=self.model, schema=_JSON_OBJECT, max_tokens=max_tokens,
+                                temperature=0.4))
         except Exception as exc:  # noqa: BLE001 — an LLM outage / rate-limit (429) must never break the
             # turn: return empty so every caller falls back to its grounded text (`out.get('text') or …`,
             # the verdict loop's `_safe_verdict`). The adapter already retried transient blips; a sustained
