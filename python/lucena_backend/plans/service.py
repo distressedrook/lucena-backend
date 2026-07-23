@@ -71,3 +71,18 @@ def sheet_for(fen: str, pool, maia=None, *, horizon: int | None = None
     _bootstrap()
     from fact_sheet import build_fact_sheet   # lucena-plans, flat module
     return build_fact_sheet(fen, pvs, rolls)
+
+
+def sheet_json_for(fen: str, pool, maia=None, *, horizon: int | None = None
+                   ) -> tuple[dict, dict]:
+    """(pre_verify_json, post_verify_json) for one position — the product
+    path since 2026-07-24 (the text sheet is retired to research use).
+    Rolls ONCE; pre is emitted from the same lines without verify_plan
+    calls, post runs the verify gate. Blocking; call off-thread."""
+    kw = {"horizon": horizon} if horizon else {}
+    with pool.lease() as engine:
+        pvs = roll_engine(engine, fen, **kw)
+    rolls = roll_maia(maia, fen, **kw)
+    _bootstrap()
+    from fact_sheet import pre_verify_json, post_verify_json
+    return pre_verify_json(fen, pvs, rolls), post_verify_json(fen, pvs, rolls)

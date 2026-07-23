@@ -263,40 +263,42 @@ def _deep_job(fen: str) -> None:
         result["positionRows"] = rows
         result["full"] = True
         if abs(cp_white) <= _plans.PLANS_CP_BAND and not _plans.is_endgame(fen):
-            sheet, _pid = _plans.sheet_for(fen, _pool, _maia)
-            sec = _sheet_sections(sheet)
-            # ASSESSMENT → the CHARACTER badge, never a row (owner ruling)
-            assess = " ".join(sec.get("ASSESSMENT", []))
-            m = re.search(r"Character:\s*([a-z-]+)", assess)
-            if m:
-                bucket = _CHAR_WORD.get(m.group(1).lower())
-                if bucket:
-                    result["characterBadge"] = _CHARACTER_BADGE[bucket]
-            # STRUCTURE: only when the catalog actually names one — the
-            # "no textbook structure" line is noise, not a fact
-            struct = sec.get("STRUCTURE", [""])[0]
-            if struct and not struct.lower().startswith("no textbook"):
-                for bit in _rows_from(struct):
-                    rows.append({"text": bit, "moves": [], "squares": []})
-            for side in ("WHITE", "BLACK"):
-                for ln in sec.get(f"WEAKNESSES FOR {side}", [])[:WEAKNESS_ROWS]:
+            _pre, post = _plans.sheet_json_for(fen, _pool, _maia)
+            # badges straight from structured data (no text parsing)
+            bucket = post["assessment"]["character"]["bucket"]
+            result["characterBadge"] = _CHARACTER_BADGE.get(bucket)
+            for s in post["structure"]:
+                rows.append({"text": _tidy(f"{s['name']} structure ({s['owner']})"),
+                             "moves": [], "squares": []})
+            for side_key, side_name in (("white", "White"), ("black", "Black")):
+                for ln in post["weaknesses"][side_key][:WEAKNESS_ROWS]:
                     for j, bit in enumerate(_rows_from(ln)):
-                        if j == 0 and not bit.lower().startswith(side.lower()):
-                            bit = f"{side.title()}: {bit[0].lower() + bit[1:]}"
+                        if j == 0 and not bit.lower().startswith(side_key):
+                            bit = f"{side_name}: {bit[0].lower() + bit[1:]}"
                         rows.append({"text": bit, "moves": [], "squares": []})
-            for side in ("WHITE", "BLACK"):
-                lines = [ln for ln in sec.get(f"PLAN FOR {side}", [])
-                         if not ln.startswith("no plan is confirmed")]
-                if lines:
-                    sections = []
-                    for ln in lines:
-                        body, tag = _timing_tag(ln)
-                        sections.append({"heading": None, "tag": tag, "rows": [
-                            {"text": bit, "moves": [], "squares": []}
-                            for bit in _rows_from(body)
-                        ]})
+            _TIMING_TAG = {"immediate": "Short term", "developing": "Long term",
+                           "long-term": "Long term"}
+            for side_key, side_name in (("white", "White"), ("black", "Black")):
+                sections = []
+                # spoken tiers only: verified plans + advisory (standing rule —
+                # unverified engine-contract candidates are data, never speech)
+                for plan in post["plans"][side_key]:
+                    if not plan.get("verified"):
+                        continue
+                    rows_p = [{"text": _tidy(plan["idea"]), "moves": [], "squares": []}]
+                    if plan.get("route_note"):
+                        rows_p.append({"text": _tidy("Route: " + plan["route_note"]
+                                                     .split(":", 1)[-1].strip()),
+                                       "moves": [], "squares": []})
+                    sections.append({"heading": None,
+                                     "tag": _TIMING_TAG.get(plan.get("timing")),
+                                     "rows": rows_p})
+                for adv in post["advisory"][side_key][:2]:
+                    sections.append({"heading": None, "tag": None, "rows": [
+                        {"text": _tidy(adv["idea"]), "moves": [], "squares": []}]})
+                if sections:
                     result["cards"].append({
-                        "id": f"plan-{side.lower()}", "title": f"Plan for {side.title()}",
+                        "id": f"plan-{side_key}", "title": f"Plan for {side_name}",
                         "count": None, "sections": sections,
                     })
     except Exception:
