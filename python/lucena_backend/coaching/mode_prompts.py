@@ -177,7 +177,7 @@ class PlansReadPrompt:
         return ("You are a chess coach reading a middlegame position on a shared analysis "
                 "board. Below you'll get a FACT SHEET for it — your only source; you have no board "
                 "or engine access. The sheet's ASSESSMENT line includes the position's CHARACTER "
-                "(quiet / lively / sharp...) with its evidence — let that set your tone: a sharp "
+                "(quiet / dynamic / sharp...) with its evidence — let that set your tone: a sharp "
                 "equal position is not 'calm', it is a knife edge.\n"
                 + cls._TIERS + cls._RULES + _perspective(freeform=True)
                 + cls._SHAPE)

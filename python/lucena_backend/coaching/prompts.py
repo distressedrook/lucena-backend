@@ -26,7 +26,7 @@ internal, not walled off, and the one file that legitimately needs to reach in s
 
 from __future__ import annotations
 
-from .grounding import _perspective, _MOVE_NUMBER_RULE, _MARKDOWN_RULE
+from .grounding import _perspective, _MOVE_NUMBER_RULE, _MARKDOWN_RULE, san_guard
 from .book_voice import _BOOK_RATING
 
 
@@ -170,6 +170,7 @@ class NarratePrompt(Prompt):
     @classmethod
     def prompt(cls, *, mover: str, played: str, book: str, moves_so_far: str, prev_book: str | None,
                swing: bool, replies: list, facts: str, position_read: str | None) -> str:
+        played, moves_so_far = san_guard(played, moves_so_far)   # SAN on the wire
         head = (cls._context_template.format(mover=mover, played=played, book=book)
                 + cls._moves_so_far_template.format(moves_so_far=moves_so_far))
         if prev_book:
@@ -230,6 +231,7 @@ class EndbookPrompt(Prompt):
     @classmethod
     def prompt(cls, *, mover: str, played: str, book: str | None, moves_so_far: str,
                position_read: str) -> str:
+        played, moves_so_far = san_guard(played, moves_so_far)   # SAN on the wire
         return (cls._context_template.format(mover=mover, played=played, book=book or "an unnamed line")
                 + cls._moves_so_far_template.format(moves_so_far=moves_so_far)
                 + cls._position_read_template.format(position_read=position_read)
@@ -269,6 +271,7 @@ class GradePrompt(Prompt):
 
     @classmethod
     def prompt(cls, text: str, facts: str, named_move: str | None = None) -> str:
+        named_move = san_guard(named_move)                       # SAN on the wire
         named = f"Their move, named: {named_move}\n" if named_move else ""
         return cls._prompt_template.format(text=text, facts=facts, named=named)
 

@@ -36,10 +36,10 @@ _ENDGAME_NPM = 13
 
 
 def is_endgame(fen: str) -> bool:
-    npm = {"white": 0, "black": 0}
-    for p in Board(fen).piece_list():
-        npm[p.color] += _NPM.get(p.piece, 0)
-    return max(npm.values()) <= _ENDGAME_NPM
+    # delegates to the core phase classifier (2026-07-23 consolidation —
+    # same NPM table and bar; one source of truth for "endgame")
+    from lucena_core.reads import game_phase
+    return game_phase(fen)["phase"] == "endgame"
 
 
 def _plans_dir() -> Path:
@@ -86,3 +86,20 @@ def sheet_json_for(fen: str, pool, maia=None, *, horizon: int | None = None
     _bootstrap()
     from fact_sheet import pre_verify_json, post_verify_json
     return pre_verify_json(fen, pvs, rolls), post_verify_json(fen, pvs, rolls)
+
+
+def sheet_json_staged(fen: str, pool, maia=None, *, horizon: int | None = None,
+                      on_pre=None) -> tuple[dict, dict]:
+    """Like sheet_json_for, but hands the pre-verify artifact to `on_pre`
+    the moment it exists (rolls done, no verify_plan calls yet), then runs
+    the verify gate and returns (pre, post). Blocking; call off-thread."""
+    kw = {"horizon": horizon} if horizon else {}
+    with pool.lease() as engine:
+        pvs = roll_engine(engine, fen, **kw)
+    rolls = roll_maia(maia, fen, **kw)
+    _bootstrap()
+    from fact_sheet import pre_verify_json, post_verify_json
+    pre = pre_verify_json(fen, pvs, rolls)
+    if on_pre is not None:
+        on_pre(pre)
+    return pre, post_verify_json(fen, pvs, rolls)
