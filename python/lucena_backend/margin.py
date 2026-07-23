@@ -111,6 +111,23 @@ def _shatter(text: str, cap: int = 3) -> list[str]:
     return out[:cap] if out else [text]
 
 
+_TIMING_SUFFIXES = (
+    # the emitter's exact three timing suffixes (fact_sheet._plan_lines) —
+    # stripped from the prose and hoisted into the idea's TAG
+    (" — playable in the short term.", "Short term"),
+    (" — not immediate: other moves happen first.", "Long term"),
+    (" — a longer-term idea, not for right now.", "Long term"),
+)
+
+
+def _timing_tag(line: str) -> tuple[str, str | None]:
+    """(line without its timing suffix, 'Short term'|'Long term'|None)."""
+    for suffix, tag in _TIMING_SUFFIXES:
+        if line.rstrip().endswith(suffix.strip()):
+            return line.rstrip()[: -len(suffix.strip())].rstrip(" —"), tag
+    return line, None
+
+
 def _rows_from(text: str) -> list[str]:
     """A sheet sentence → legible rows. Parentheticals become their own rows
     (the '(route the engine plays: f3-e5)' pattern gets its template), then
@@ -271,13 +288,16 @@ def _deep_job(fen: str) -> None:
                 lines = [ln for ln in sec.get(f"PLAN FOR {side}", [])
                          if not ln.startswith("no plan is confirmed")]
                 if lines:
+                    sections = []
+                    for ln in lines:
+                        body, tag = _timing_tag(ln)
+                        sections.append({"heading": None, "tag": tag, "rows": [
+                            {"text": bit, "moves": [], "squares": []}
+                            for bit in _rows_from(body)
+                        ]})
                     result["cards"].append({
                         "id": f"plan-{side.lower()}", "title": f"Plan for {side.title()}",
-                        "count": None,
-                        "sections": [{"heading": None, "rows": [
-                            {"text": bit, "moves": [], "squares": []}
-                            for ln in lines for bit in _rows_from(ln)
-                        ]}],
+                        "count": None, "sections": sections,
                     })
     except Exception:
         _log.warning("margin deep layer failed for %s", fen, exc_info=True)
