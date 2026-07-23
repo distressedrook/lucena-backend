@@ -22,7 +22,7 @@ prompt can leak them.
 
 from __future__ import annotations
 
-from .grounding import _MARKDOWN_RULE, _MOVE_NUMBER_RULE, _NO_INVENTION_RULE, _perspective
+from .grounding import _MARKDOWN_RULE, _MOVE_NUMBER_RULE, _NO_INVENTION_RULE, _perspective, san_guard
 
 
 class FreeformPrompt:
@@ -104,6 +104,7 @@ class ReadPrompt:
 
     @classmethod
     def prompt(cls, *, facts: str, played: str | None = None) -> str:
+        played = san_guard(played)                               # SAN on the wire
         head = f"{played} was just played.\n" if played else ""
         return f"{head}Grounded facts (read ONLY from these):\n{facts}\n\nRespond as JSON."
 
@@ -116,40 +117,58 @@ class PlansReadPrompt:
     Output: {text}."""
 
     _TIERS = (
-        "The fact sheet has two reliability tiers — keep them distinct:\n"
-        "- PLAN FOR WHITE / PLAN FOR BLACK has been checked against real engine analysis for this "
-        "exact position. Treat these as confirmed; make them the heart of your explanation.\n"
-        "- Everything else (assessment, position read, structure, weaknesses) is true board "
+        "The fact sheet is JSON. It has two reliability tiers — keep them distinct:\n"
+        "- plans.white / plans.black entries with verified=true have been checked against real "
+        "engine analysis for this exact position. Treat these as confirmed; make them the heart "
+        "of your explanation. NEVER mention an entry with verified=false or verified=null — "
+        "unconfirmed candidates are data, not coaching. The advisory entries may be mentioned "
+        "as general guidance.\n"
+        "- Everything else (assessment, reads, structure, weaknesses) is true board "
         "geometry, but not individually engine-checked — don't imply a listed weakness is "
-        "currently winning or forcing unless a PLAN says so.\n"
+        "currently winning or forcing unless a verified plan says so.\n"
     )
     _RULES = (
-        "Every fact is labeled for a specific side; a WEAKNESSES FOR X item is a liability for X, "
-        "never an asset — don't invert it. Don't invent anything not stated (piece locations, "
-        "moves, tactics, threats, evaluations). Plain words only: no centipawns, win%, or internal "
-        "jargon, and never mention the position id or the fact sheet itself.\n"
+        "Every fact is labeled for a specific side; a weaknesses.white item is a liability for "
+        "White (same for black), never an asset — don't invert it. A fact belongs ONLY in that "
+        "side's part of the story — when the prose is flowing and unheaded it's easy to let a "
+        "stray fact drift into the wrong side's sentence; before finishing, check every "
+        "square/piece you named against which weaknesses/plans list it actually came from. "
+        "Don't invent anything not stated (piece locations, moves, tactics, threats, "
+        "evaluations). Plain words only: no centipawns, win%, JSON field names, or internal "
+        "jargon (verdict codes, effect numbers, maia_frac), and never mention the position id "
+        "or the fact sheet itself.\n"
     )
-    # The player-requested layout (2026-07-22): fixed sections, each under its own bold heading.
-    # The THEORY section is the one place the model may speak from its own knowledge — and only
-    # about the structure the sheet NAMES (the same carve-out as opening narration: ideas and
-    # typical plans, never concrete lines, evals, or verdicts of its own).
+    # 2026-07-22 rewrite: the headed-bullets layout read like a textbook entry, not a coach
+    # talking; then fixed to 4 flowing paragraphs at a ~300-word budget (player-specified).
+    # Same required CONTENT as before (character, both sides' weaknesses, both sides' plans
+    # with timing, structure theory when named), now grouped by BEAT rather than by side — each
+    # paragraph covers both colours where relevant, in sentences, never headings or bullets.
+    # The THEORY paragraph is still the one place the model may speak from its own knowledge —
+    # and only about the structure the sheet NAMES (the same carve-out as opening narration:
+    # ideas and typical plans, never concrete lines, evals, or verdicts of its own).
     _SHAPE = (
-        "FORMATTING: bold (**…**) for headings/emphasis and \"- \" bullets only — no markdown "
-        "headers (#), links, code, or nested lists.\n"
-        "Write the read as SECTIONS, each under a bold heading on its own line, in exactly this "
-        "order:\n"
-        "**Summary** — the assessment and the character of the position from the POSITION READ, in "
-        "1-2 sentences.\n"
-        "**White's Weaknesses** — the WEAKNESSES FOR WHITE items as short bullets. If the sheet "
-        "lists none, one line: nothing significant.\n"
-        "**Black's Weaknesses** — same, from WEAKNESSES FOR BLACK.\n"
-        "**White's Plans** — the PLAN FOR WHITE items as bullets, each in plain coaching words, "
-        "keeping any timing the sheet gives (now vs longer-term).\n"
-        "**Black's Plans** — same, from PLAN FOR BLACK.\n"
-        "**The Structure** — ONLY if the sheet's STRUCTURE line names one: 2-3 sentences of "
-        "standard textbook understanding of that named structure from your own knowledge — the "
-        "typical ideas and plans for each side, and connect them to the plans above where they "
-        "agree. Omit the whole section (heading included) when no structure is named.\n"
+        "FORMATTING: Markdown, but used sparingly. Separate the four paragraphs with a blank "
+        "line (a real paragraph break in the rendered output, not just a sentence pause) — this "
+        "is the one formatting requirement that matters most, so double-check `text` actually "
+        "contains it between every paragraph. **Bold** is allowed for a genuine highlight — the "
+        "one square, move, or idea that's actually the crux of that paragraph — never as a "
+        "pseudo-heading and never applied on reflex; most paragraphs need zero bold at all. No "
+        "bullet lists, no # headers, no other markdown. Each paragraph is a coach talking through "
+        "that part of the position out loud, sentences connected by ordinary language ('Which is "
+        "exactly why...', 'The trouble for Black is...'), never a topic label or a list.\n"
+        "Write EXACTLY four paragraphs, in this order, about 300 words total:\n"
+        "1. Summary — the assessment and the position's character (from the sheet's Character "
+        "line), the hook for what kind of fight this actually is.\n"
+        "2. Weakness — both sides' weaknesses in one paragraph, told as their respective "
+        "troubles, not two separate lists stapled together. Skip a side with nothing listed "
+        "rather than inventing one.\n"
+        "3. Plan — both sides' plans, what each is reaching for, keeping any timing the sheet "
+        "gives (now vs longer-term) as part of the sentence, not a label.\n"
+        "4. Theory — ONLY if the sheet names a STRUCTURE: standard textbook understanding of it "
+        "from your own knowledge, the typical ideas for each side, connected to what you've "
+        "already said in paragraphs 2-3 where they agree. If no structure is named, fold "
+        "paragraph 3's content into a 3-paragraph reply instead — never invent a structure to "
+        "fill this slot.\n"
         'Return JSON: {"text": string}.'
     )
 

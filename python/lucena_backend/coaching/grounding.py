@@ -11,6 +11,34 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+# ---------------------------------------------------------------------------
+# SAN on the wire — the guard. Load-bearing convention (superrepo CLAUDE.md):
+# UCI is engine-internal only; the backend and app speak SAN. It has been
+# violated repeatedly at call sites (latest live leak 2026-07-24: the coach
+# said "**c7c6** was just played"), so it is now GUARDED, not trusted: every
+# Prompt classmethod routes its move-bearing params through san_guard, and a
+# UCI-shaped token anywhere raises at assembly time — the bug dies at the
+# typed-prompt seam instead of surfacing in a beat.
+# ---------------------------------------------------------------------------
+
+_UCI_TOKEN = re.compile(r"\b[a-h][1-8][a-h][1-8][qrbn]?\b")
+
+
+def san_guard(*values: str | None):
+    """Assert no UCI-shaped token appears in any move-bearing prompt input.
+
+    Accepts None/empty (optional params). Returns the single value (or the
+    tuple) unchanged so call sites can wrap in place:
+        played=san_guard(played)
+    Raises ValueError naming the offending token — convert to SAN at the
+    boundary (the assess/evaluate probes already carry `san`)."""
+    for v in values:
+        if v and (m := _UCI_TOKEN.search(v)):
+            raise ValueError(
+                f"UCI leaked into a prompt: {m.group(0)!r} inside {v!r} — "
+                "SAN on the wire; convert at the boundary, never here")
+    return values[0] if len(values) == 1 else values
+
 # Shared across every prompt that hands the model a move to name. The number is COMPUTED (see
 # `_numbered`) and baked into the SAN wherever a move is interpolated into CONTEXT/facts text —
 # this just tells the model to keep what it was given rather than strip it or roll its own.

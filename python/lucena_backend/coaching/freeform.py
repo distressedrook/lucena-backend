@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from lucena_engine import openings
+from lucena_core import openings
 
 from .. import plans as _plans
 from .book_voice import (_BOOK_RATING, _BOOK_REPLIES, _COACH, _ENDBOOK, _NARRATE, _book_route, _is_swing)
@@ -49,23 +49,45 @@ class FreeformHandler(HandlerBase):
     async def _on_position(self, inp) -> Outcome:
         # Set the board deterministically (FEN detection lives in set_board_from_paste).
         await asyncio.to_thread(self.ctx.set_board_from_paste, inp.fen or inp.text or "")
-        fen = self.store.board_view
-        # THE PASTE ROUTE (2026-07-22): drillable → coach; in book → the lucena-engine grounded read
-        # (the facts carry the opening name — the book prompt arm is a later build); quiet + out of
-        # book + MIDDLEGAME + equalish (|eval| <= 1.5) → the PLANS layer (lucena-plans fact sheet
-        # narrated by PlansReadPrompt); everything else → the plain grounded read (rest built later).
+        return await self._read_position(self.store.board_view)
+
+    async def _read_position(self, fen, *, played: str | None = None) -> Outcome:
+        """THE position pipeline — paste and board-move both land here (owner
+        ruling 2026-07-24: a move on the board goes through the same path as
+        conversation). Route (2026-07-22): drillable → coach; quiet + out of
+        book + MIDDLEGAME + equalish (|eval| <= 1.5) → the PLANS layer
+        (lucena-plans fact sheet narrated by PlansReadPrompt); everything
+        else → the plain grounded read. `played` threads the just-played move
+        into the plain read's prose; the in-book case never reaches here from
+        the move path (the book-voice arm routes first).
+
+        Drillable asymmetry (owner report 2026-07-24: "I was making a move,
+        the system suddenly flipped and showed me a puzzle"): a PASTE of a
+        tactical position is an implicit "coach me on this" → enter the
+        drill. A MOVE is play in progress — and worse, post-move the side to
+        move is the OPPONENT, so auto-entering flips the board and drills
+        the player as the other side. So on the move path the drill is an
+        INVITATION: the lesson spec is armed (a "drill it" reply enters
+        instantly), a deterministic nudge says so, and the turn continues as
+        a normal read.
+        """
         preview = await asyncio.to_thread(self.ctx.preview_drill, fen)
         if isinstance(preview, dict) and preview.get("drillable"):
             self.store.save_lesson_spec(puzzle_spec(fen, preview["tree"]))
-            return EnterCoach(type="puzzle", source={"kind": "current"})
+            if played is None:
+                return EnterCoach(type="puzzle", source={"kind": "current"})
+            side = "White" if " w " in f" {fen} " else "Black"
+            self._say(f"Heads up — {side} has a forcing win in this position. "
+                      f"Say drill it to work it out, or just keep playing.")
         if not openings.name_for(fen) and (text := await self._plans_read(fen)):
             self._say(text)
             return Handled()
         # A quiet (non-forcing) position → a freeform grounded read.
         facts = await self._ground(fen)
         out = await self._gen_json(ReadPrompt.system(),
-                                   ReadPrompt.prompt(facts=_brief(facts)))
-        self._say(out.get("text") or "Let's take a look at this position.")
+                                   ReadPrompt.prompt(facts=_brief(facts), played=played),
+                                   temperature=1.0)  # varied prose across repeated reads
+        self._say(out.get("text") or ("" if played else "Let's take a look at this position."))
         return Handled()
 
     async def _plans_read(self, fen) -> str | None:
@@ -89,14 +111,17 @@ class FreeformHandler(HandlerBase):
             # on when Maia is configured (user ruling 2026-07-22: "Maia should never be off" —
             # human-typicality is part of the product, latency paid); verify degrades to the engine
             # leg only when the process has no MaiaEngine at all (LUCENA_MAIA unset).
-            sheet, _pid = await asyncio.to_thread(
-                _plans.sheet_for, fen, self.ground._pool, self.ctx.maia)
+            _pre, post = await asyncio.to_thread(
+                _plans.sheet_json_for, fen, self.ground._pool, self.ctx.maia)
+            import json as _json
+            sheet = _json.dumps(post, indent=2)
         except Exception:  # noqa: BLE001 — a missing checkout / engine hiccup degrades, never breaks
             _log.warning("plans layer unavailable; falling back to plain read", exc_info=True)
             return None
         out = await self._gen_json(PlansReadPrompt.system(),
                                    PlansReadPrompt.prompt(sheet=sheet),
-                                   max_tokens=800)   # six headed sections need the headroom
+                                   max_tokens=800,   # six headed sections need the headroom
+                                   temperature=1.0)  # varied prose across repeated reads
         return (out or {}).get("text")
 
     async def _on_move(self, inp) -> Outcome:
@@ -113,10 +138,11 @@ class FreeformHandler(HandlerBase):
         probe = (await asyncio.to_thread(self.ground.assess_move, pre_fen, inp.uci)) if pre_fen else {}
         swing = _is_swing(probe)
         route, book, prev_book = _book_route(self._history_fens(), swing)
-        # Ground ONLY where the branch reads it: a plain move-explain (COACH) always; a NARRATE only on
-        # a swing, where the concession needs the positional read. ENDBOOK and a normal in-book ply
-        # narrate from the opening name + move line alone — no cold position search.
-        facts = (await self._ground(fen)) if (route == _COACH or (route == _NARRATE and swing)) else {}
+        # Ground ONLY where the branch reads it: a NARRATE on a swing, where the concession needs
+        # the positional read. ENDBOOK and a normal in-book ply narrate from the opening name +
+        # move line alone — no cold position search. The COACH branch grounds inside
+        # _read_position (the unified pipeline) instead.
+        facts = (await self._ground(fen)) if (route == _NARRATE and swing) else {}
         # Opening-book narration arm: if the played move is still in book, narrate it in the BOOK VOICE
         # (or hand off at end-of-book) rather than a plain grounded read. Reuses the whole existing
         # subsystem (book_voice routing + NarratePrompt/EndbookPrompt + the openings table + Maia
@@ -125,16 +151,16 @@ class FreeformHandler(HandlerBase):
             # The full verdict (Δwin%, class, refutation the concession renders) only when there is a
             # swing to explain; otherwise the probe's san/class is all the book voice uses.
             verdict = (await asyncio.to_thread(self.ground.evaluate, pre_fen, [inp.uci])) if swing else \
-                {"san": probe.get("san") or inp.san or inp.uci, "class": probe.get("class")}
+                {"san": self._san(pre_fen, inp, probe), "class": probe.get("class")}
             await self._narrate_opening(route, inp, pre_fen, verdict, facts, book, prev_book)
             self._title_from_opening(book)
             return Handled()
-        # else _COACH: the plain grounded move-explain.
-        out = await self._gen_json(ReadPrompt.system(),
-                                   ReadPrompt.prompt(facts=_brief(facts),
-                                                              played=inp.san or inp.uci))
-        self._say(out.get("text") or "")
-        return Handled()
+        # else _COACH (out of book): the SAME pipeline as a conversation paste —
+        # drillable → coach handoff, quiet equalish middlegame → plans read,
+        # otherwise the plain grounded move-explain (owner ruling 2026-07-24).
+        # SAN on the wire: the app sends UCI; the probe already converted it —
+        # raw UCI must never reach prose (caught live: "**c7c6** was just played").
+        return await self._read_position(fen, played=self._san(pre_fen, inp, probe))
 
     async def _on_walk(self, inp) -> Outcome:
         # Walking a variation: the app has ALREADY moved the shared analysis board onto a sideline move
@@ -146,14 +172,15 @@ class FreeformHandler(HandlerBase):
         facts = await self._ground(fen)
         out = await self._gen_json(ReadPrompt.system(),
                                    ReadPrompt.prompt(facts=_brief(facts),
-                                                     played=inp.san or inp.uci))
+                                                     played=self._san(inp.fen, inp)),
+                                   temperature=1.0)  # varied prose across repeated reads
         self._say(out.get("text") or "")
         return Handled()
 
     # -- opening-book narration (ported from the retired Orchestrator._narrate_move) ---------------
     async def _narrate_opening(self, route, inp, pre_fen, verdict, nxt, book, prev_book) -> None:
         mover = _mover(pre_fen)
-        played = _numbered((verdict or {}).get("san") or inp.san or inp.uci, pre_fen)
+        played = _numbered((verdict or {}).get("san") or self._san(pre_fen, inp), pre_fen)
         moves_so_far = self._played_line() or played
         if route == _ENDBOOK:
             prompt = EndbookPrompt.prompt(mover=mover, played=played, book=book,

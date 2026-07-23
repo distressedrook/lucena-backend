@@ -27,7 +27,8 @@ class HandlerBase:
         self.model = model
         self._llm = llm
 
-    async def _gen_json(self, system: str, prompt: str, *, max_tokens: int = 400) -> dict:
+    async def _gen_json(self, system: str, prompt: str, *, max_tokens: int = 400,
+                        temperature: float = 0.4) -> dict:
         if os.environ.get("LUCENA_DEBUG_PROMPT"):
             print(f"\n===== LLM PROMPT =====\n--- SYSTEM ---\n{system}\n\n--- USER ---\n{prompt}\n"
                   f"======================", flush=True)
@@ -35,7 +36,7 @@ class HandlerBase:
             comp = await self._llm.generate(
                 [Message("system", system), Message("user", prompt)],
                 GenerateOptions(model=self.model, schema=_JSON_OBJECT, max_tokens=max_tokens,
-                                temperature=0.4))
+                                temperature=temperature))
         except Exception as exc:  # noqa: BLE001 — an LLM outage / rate-limit (429) must never break the
             # turn: return empty so every caller falls back to its grounded text (`out.get('text') or …`,
             # the verdict loop's `_safe_verdict`). The adapter already retried transient blips; a sustained
@@ -53,10 +54,28 @@ class HandlerBase:
         return await asyncio.to_thread(self.ground.analyze_and_show, fen,
                                        focus=focus, board_push=False)
 
+    # -- SAN on the wire (guarded seam #1: the input boundary) -------------------------------------
+    def _san(self, pre_fen, inp, probe: dict | None = None) -> str:
+        """Resolve the played move to SAN, deterministically — the ONE place a
+        raw UCI is allowed to exist on its way into any prose/prompt. Order:
+        probe san → wire san → board conversion. NEVER returns UCI: if all
+        else fails it converts on the board or raises (loud beats leaked)."""
+        san = (probe or {}).get("san") or inp.san
+        if san:
+            return san
+        if inp.uci and pre_fen:
+            from lucena_core.board import Board
+            return Board(pre_fen).san(inp.uci)     # raises on garbage — good
+        raise ValueError(f"cannot resolve SAN for move {inp.uci!r} (no pre-move fen)")
+
     # -- beats (the player-visible channel; the Outcome is the other channel) ----------------------
     def _say(self, text: str, *, tone: str = "teach", stops: bool = False) -> None:
         if not text:
             return
+        # Guarded seam #2 (the output net): NOTHING UCI-shaped reaches a beat,
+        # whatever its origin — a call-site slip, a fact leak, an LLM echo.
+        from .grounding import san_guard
+        san_guard(text)
         self.store.append_beats([{"kind": "say", "tone": tone, "stops": stops,
                                   "segments": [{"text": text}]}])
 

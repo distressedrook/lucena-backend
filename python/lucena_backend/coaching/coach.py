@@ -331,7 +331,7 @@ class CoachHandler(HandlerBase):
         # `player_color` (the answer's PRE-move side to move) is the fixed perspective anchor — the
         # board now shows the opponent to move, so "you play the side to move" flips White/Black.
         facts = await self._move_facts(inp, correct, grounding, bit)
-        attempt = inp.san or inp.uci or (inp.text or "")
+        attempt = inp.san or (self._san(self.store.board_view, inp) if inp.uci else (inp.text or ""))
         sys = VerdictPrompt.system(correct=correct, player_color=player_color)
         usr = VerdictPrompt.prompt(attempt=attempt, facts=facts)
         # DETERMINISTIC GUARD (prompt rules alone didn't hold): reject any verdict that NAMES a move
