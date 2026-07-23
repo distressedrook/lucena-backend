@@ -24,7 +24,9 @@ cached per position; the app polls while `plansPending`.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
@@ -49,11 +51,71 @@ _lock = threading.Lock()
 _worker = ThreadPoolExecutor(max_workers=1)   # ONE: plans rolls are heavy
 
 
-def configure(pool, maia) -> None:
+_llm = None
+_model = None
+
+
+def configure(pool, maia, llm=None, model=None) -> None:
     """Called once at server build; without it the deep layer stays off and
     the margin serves the instant layer only (tests, offline)."""
-    global _pool, _maia
-    _pool, _maia = pool, maia
+    global _pool, _maia, _llm, _model
+    _pool, _maia, _llm, _model = pool, maia, llm, model
+
+
+# -- the polish pass (owner 2026-07-24: "the sentences look unnatural") ------
+# The LLM is a LEXICALIZER here, never an analyst (house doctrine): it may
+# rephrase a grounded line, and the rewrite is verified mechanically — every
+# square/move token must already exist in the original, and no evaluation
+# word may appear that the original didn't carry. Any violation, any error,
+# any outage → the original deterministic line stands (always true).
+
+_TOKEN_RE = re.compile(
+    r"\b(?:[a-h][1-8](?:-[a-h][1-8])?|O-O(?:-O)?|[KQRBN][a-h]?[1-8]?x?[a-h][1-8][+#]?"
+    r"|[a-h]x[a-h][1-8](?:=[QRBN])?[+#]?)\b")
+_EVAL_WORDS = ("winning", "better", "worse", "losing", "lost", "mate", "decisive", "crushing")
+
+_POLISH_SYSTEM = (
+    "You polish short grounded chess facts for a printed book margin. Rewrite "
+    "each line so it reads naturally — plain, confident coaching prose, one "
+    "sentence, no filler. HARD RULES: never add, remove, or soften a chess "
+    "claim; never mention a square, move, or piece the line does not mention; "
+    "never add evaluations. Keep any move notation exactly as written. Return "
+    'JSON: {"lines": [string, ...]} — same count, same order.')
+
+
+def _tokens(s: str) -> set[str]:
+    return {m.rstrip("+#") for m in _TOKEN_RE.findall(s)}
+
+
+def _verified(original: str, rewrite: str) -> bool:
+    if not rewrite or len(rewrite) > max(160, 2 * len(original)):
+        return False
+    if not _tokens(rewrite) <= _tokens(original):
+        return False              # invented a square/move — hallucination by construction
+    low_o, low_r = original.lower(), rewrite.lower()
+    return all(w in low_o for w in _EVAL_WORDS if w in low_r)
+
+
+def _polish(lines: list[str]) -> list[str]:
+    """One LLM call for the batch; per-line verification; originals on any miss."""
+    if _llm is None or not lines:
+        return lines
+    try:
+        from .llm.interface import Message, GenerateOptions
+        numbered = "\n".join(f"{i + 1}. {ln}" for i, ln in enumerate(lines))
+        comp = asyncio.run(_llm.generate(
+            [Message("system", _POLISH_SYSTEM),
+             Message("user", f"Lines:\n{numbered}\n\nRespond as JSON.")],
+            GenerateOptions(model=_model, schema={"type": "object"},
+                            max_tokens=1200, temperature=0.4)))
+        out = (comp.json or {}).get("lines") or []
+    except Exception:
+        _log.warning("margin polish failed; keeping grounded lines", exc_info=True)
+        return lines
+    if len(out) != len(lines):
+        return lines
+    return [rw.strip() if isinstance(rw, str) and _verified(orig, rw.strip()) else orig
+            for orig, rw in zip(lines, out)]
 
 
 def _plies_played(fen: str) -> int:
@@ -177,7 +239,11 @@ def _deep_job(fen: str) -> None:
                 rows.append({"text": sec["STRUCTURE"][0], "moves": [], "squares": []})
             for side in ("WHITE", "BLACK"):
                 for ln in sec.get(f"WEAKNESSES FOR {side}", [])[:WEAKNESS_ROWS]:
-                    rows.append({"text": f"{side.title()}: {ln}", "moves": [], "squares": []})
+                    # no "White: White's ..." stutter — prefix only when the
+                    # line doesn't already name its side
+                    text = ln if ln.lower().startswith(side.lower()) \
+                        else f"{side.title()}: {ln}"
+                    rows.append({"text": text, "moves": [], "squares": []})
             result["positionRows"] = rows
             for side in ("WHITE", "BLACK"):
                 lines = [ln for ln in sec.get(f"PLAN FOR {side}", [])
@@ -190,6 +256,18 @@ def _deep_job(fen: str) -> None:
                             {"text": ln, "moves": [], "squares": []} for ln in lines
                         ]}],
                     })
+        # the polish pass — one batch over everything the deep layer wrote
+        flat = ([r["text"] for r in result["positionRows"]]
+                + [row["text"] for c in result["cards"]
+                   for s in c["sections"] for row in s["rows"]])
+        polished = _polish(flat)
+        it = iter(polished)
+        for r in result["positionRows"]:
+            r["text"] = next(it)
+        for c in result["cards"]:
+            for s in c["sections"]:
+                for row in s["rows"]:
+                    row["text"] = next(it)
     except Exception:
         _log.warning("margin deep layer failed for %s", fen, exc_info=True)
     key = " ".join(fen.split()[:4])

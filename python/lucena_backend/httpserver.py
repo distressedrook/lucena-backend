@@ -131,8 +131,7 @@ def build_app(*, home: str, llm=None, model: str = _DEFAULT_MODEL,
     # MaiaEngine.top_human_moves holds its own lock across the whole conversation — but one predictor
     # per process is deliberate: each instance is a ~485MB torch model.)
     ground_ctx = ToolContext(store=store, pool=pool, maia=None, player_rating=rating)
-    from . import margin as _margin_mod
-    _margin_mod.configure(pool=pool, maia=maia)   # the margin deep layer's engine access
+
 
     # The conversation spine (LLD): one ConversationLoop routes turn+move by mode. It fully REPLACES
     # the retired Orchestrator/QuickCoach; `_dispatch` routes every turn/move through it. (Prompt
@@ -142,6 +141,8 @@ def build_app(*, home: str, llm=None, model: str = _DEFAULT_MODEL,
     from .coaching.coach import CoachHandler
     from .llm import make_adapter as _make_adapter
     _spine_llm = llm or _make_adapter({"provider": "gemini", "default_model": model})
+    from . import margin as _margin_mod
+    _margin_mod.configure(pool=pool, maia=maia, llm=_spine_llm, model=model)   # deep layer + polish
     loop = ConversationLoop(
         store=store,
         freeform=FreeformHandler(ctx=ctx, store=store, llm=_spine_llm, model=model, ground=ground_ctx),
