@@ -76,11 +76,11 @@ _EVAL_WORDS = ("winning", "better", "worse", "losing", "lost", "mate", "decisive
 
 _POLISH_SYSTEM = (
     "You polish short grounded chess facts for a printed book margin. Rewrite "
-    "each line so it reads naturally — plain, confident coaching prose, one "
-    "sentence, no filler. HARD RULES: never add, remove, or soften a chess "
-    "claim; never mention a square, move, or piece the line does not mention; "
-    "never add evaluations. Keep any move notation exactly as written. Return "
-    'JSON: {"lines": [string, ...]} — same count, same order.')
+    "each line so it reads naturally: ONE crisp statement, at most twelve "
+    "words, no filler, no run-ons. HARD RULES: never add, remove, or soften "
+    "a chess claim; never mention a square, move, or piece the line does not "
+    "mention; never add evaluations. Keep move notation exactly as written. "
+    'Return JSON: {"lines": [string, ...]} — same count, same order.')
 
 
 def _tokens(s: str) -> set[str]:
@@ -88,8 +88,8 @@ def _tokens(s: str) -> set[str]:
 
 
 def _verified(original: str, rewrite: str) -> bool:
-    if not rewrite or len(rewrite) > max(160, 2 * len(original)):
-        return False
+    if not rewrite or len(rewrite) > min(110, max(90, len(original) + 10)):
+        return False              # a margin row is a line, never a paragraph
     if not _tokens(rewrite) <= _tokens(original):
         return False              # invented a square/move — hallucination by construction
     low_o, low_r = original.lower(), rewrite.lower()
@@ -116,6 +116,29 @@ def _polish(lines: list[str]) -> list[str]:
         return lines
     return [rw.strip() if isinstance(rw, str) and _verified(orig, rw.strip()) else orig
             for orig, rw in zip(lines, out)]
+
+
+def _shatter(text: str, cap: int = 3) -> list[str]:
+    """One compound sheet sentence → up to `cap` short rows (owner: the rows
+    are right, the paragraphs are not). Split on em-dash and semicolon
+    clauses, and on sentence breaks when both halves are substantial."""
+    parts = [text]
+    for sep in (" — ", "; "):
+        parts = [q.strip() for s in parts for q in s.split(sep) if q.strip()]
+    out: list[str] = []
+    for s in parts:
+        if ". " in s:
+            for q in s.split(". "):
+                q = q.strip().rstrip(".")
+                if len(q) >= 12:
+                    out.append(q + ".")
+                elif out:
+                    out[-1] = out[-1].rstrip(".") + f". {q}."
+                elif q:
+                    out.append(q + ".")
+        elif s:
+            out.append(s if s.endswith((".", "!", "?")) else s + ".")
+    return out[:cap] if out else [text]
 
 
 def _plies_played(fen: str) -> int:
@@ -232,18 +255,22 @@ def _deep_job(fen: str) -> None:
         if abs(cp_white) <= _plans.PLANS_CP_BAND and not _plans.is_endgame(fen):
             sheet, _pid = _plans.sheet_for(fen, _pool, _maia)
             sec = _sheet_sections(sheet)
-            if sec.get("ASSESSMENT"):
-                result["evalLine"] = sec["ASSESSMENT"][0].rstrip(".")
             rows = []
+            if sec.get("ASSESSMENT"):
+                bits = _shatter(sec["ASSESSMENT"][0])
+                result["evalLine"] = bits[0].rstrip(".")
+                for extra in bits[1:]:
+                    rows.append({"text": extra, "moves": [], "squares": []})
             if sec.get("STRUCTURE"):
                 rows.append({"text": sec["STRUCTURE"][0], "moves": [], "squares": []})
             for side in ("WHITE", "BLACK"):
                 for ln in sec.get(f"WEAKNESSES FOR {side}", [])[:WEAKNESS_ROWS]:
                     # no "White: White's ..." stutter — prefix only when the
                     # line doesn't already name its side
-                    text = ln if ln.lower().startswith(side.lower()) \
-                        else f"{side.title()}: {ln}"
-                    rows.append({"text": text, "moves": [], "squares": []})
+                    for j, bit in enumerate(_shatter(ln)):
+                        text = bit if j > 0 or bit.lower().startswith(side.lower()) \
+                            else f"{side.title()}: {bit}"
+                        rows.append({"text": text, "moves": [], "squares": []})
             result["positionRows"] = rows
             for side in ("WHITE", "BLACK"):
                 lines = [ln for ln in sec.get(f"PLAN FOR {side}", [])
@@ -253,7 +280,8 @@ def _deep_job(fen: str) -> None:
                         "id": f"plan-{side.lower()}", "title": f"Plan for {side.title()}",
                         "count": None,
                         "sections": [{"heading": None, "rows": [
-                            {"text": ln, "moves": [], "squares": []} for ln in lines
+                            {"text": bit, "moves": [], "squares": []}
+                            for ln in lines for bit in _shatter(ln)
                         ]}],
                     })
         # the polish pass — one batch over everything the deep layer wrote
