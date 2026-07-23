@@ -242,9 +242,19 @@ def _deep_job(fen: str) -> None:
     """The background pass for one live position: eval probe → route →
     (plans sheet | loud/endgame words). Every failure caches an empty deep
     result so the app's polling terminates."""
-    result: dict = {"evalLine": None, "cards": [], "positionRows": []}
+    result: dict = {"evalLine": None, "cards": [], "positionRows": [], "full": False}
     try:
         from .plans import service as _plans
+        board = Board(fen)
+        base_rows = [{"text": material(board)["standing"], "moves": [], "squares": []}]
+        try:
+            from .grounding_tools.facts import build_fact_sheet
+            for f in build_fact_sheet(board, None):
+                if f.kind != "opening":
+                    base_rows.append({"text": f.text, "moves": [],
+                                      "squares": f.squares[:3]})
+        except Exception:
+            pass
         with _pool.lease() as engine:
             engine.new_game()
             a = engine.analyse(fen, nodes=DEEP_NODES, multipv=1)
@@ -252,15 +262,19 @@ def _deep_job(fen: str) -> None:
         white_to_move = " w " in f" {fen} "
         cp_white = cp if white_to_move else -cp
         result["evalLine"] = _eval_words(cp_white)
+        result["positionRows"] = list(base_rows)
+        result["full"] = True
         if abs(cp_white) <= _plans.PLANS_CP_BAND and not _plans.is_endgame(fen):
             sheet, _pid = _plans.sheet_for(fen, _pool, _maia)
             sec = _sheet_sections(sheet)
-            rows = []
+            rows = list(base_rows)
+            result["full"] = True          # replaces the instant rows wholesale
             if sec.get("ASSESSMENT"):
                 bits = _shatter(sec["ASSESSMENT"][0])
                 result["evalLine"] = bits[0].rstrip(".")
                 for extra in bits[1:]:
                     rows.append({"text": extra, "moves": [], "squares": []})
+            result["positionRows"] = rows
             if sec.get("STRUCTURE"):
                 rows.append({"text": sec["STRUCTURE"][0], "moves": [], "squares": []})
             for side in ("WHITE", "BLACK"):
@@ -271,7 +285,6 @@ def _deep_job(fen: str) -> None:
                         text = bit if j > 0 or bit.lower().startswith(side.lower()) \
                             else f"{side.title()}: {bit}"
                         rows.append({"text": text, "moves": [], "squares": []})
-            result["positionRows"] = rows
             for side in ("WHITE", "BLACK"):
                 lines = [ln for ln in sec.get(f"PLAN FOR {side}", [])
                          if not ln.startswith("no plan is confirmed")]
@@ -364,10 +377,16 @@ def build(fen: str, *, seed: str = "", live: bool = False) -> dict:
     key = " ".join(fen.split()[:4])
     deep = _deep_cache.get(key)
     if deep is not None:
+        if deep.get("full"):
+            # the deep pass owns the WHOLE row set, polished as one batch
+            # (owner: every single sentence goes through the formatter)
+            pos_rows = list(deep["positionRows"])
+        else:
+            pos_rows = pos_rows + list(deep["positionRows"])
         if deep["evalLine"]:
             pos_rows.insert(0, {"text": deep["evalLine"], "moves": [], "squares": []})
-        pos_rows.extend(deep["positionRows"])
-        out["cards"] = [out["cards"][0]] + deep["cards"]
+        out["cards"] = [{"id": "position", "title": "Position", "count": None,
+                         "sections": [{"heading": None, "rows": pos_rows}]}] + deep["cards"]
         out["plansPending"] = False
     elif live and _pool is not None:
         with _lock:
