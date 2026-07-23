@@ -138,16 +138,18 @@ def _sheet_sections(sheet: str) -> dict[str, list[str]]:
     out: dict[str, list[str]] = {}
     current = None
     for raw in sheet.splitlines():
-        if raw.startswith("  ") and current:
-            line = raw.strip()
-            if line:
-                out.setdefault(current, []).append(line)
-        elif raw and not raw.startswith(" ") and ":" in raw:
+        is_header = (raw and not raw.startswith(" ") and ":" in raw
+                     and (raw.partition(":")[0].isupper() or raw.startswith("===")))
+        if is_header:
             head, _, rest = raw.partition(":")
-            if head.isupper() or head.startswith("==="):
-                current = head.strip("= ").strip()
-                if rest.strip():
-                    out.setdefault(current, []).append(rest.strip())
+            current = head.strip("= ").strip()
+            if rest.strip():
+                out.setdefault(current, []).append(rest.strip())
+        elif current and raw.strip():
+            # section content: two-space indents (weaknesses, reads) AND
+            # dash bullets (plan lines — caught live: plans start '- ',
+            # not '  ', and were silently dropped)
+            out.setdefault(current, []).append(raw.strip().lstrip("- ").strip())
     return out
 
 
@@ -178,7 +180,8 @@ def _deep_job(fen: str) -> None:
                     rows.append({"text": f"{side.title()}: {ln}", "moves": [], "squares": []})
             result["positionRows"] = rows
             for side in ("WHITE", "BLACK"):
-                lines = sec.get(f"PLAN FOR {side}", [])
+                lines = [ln for ln in sec.get(f"PLAN FOR {side}", [])
+                         if not ln.startswith("no plan is confirmed")]
                 if lines:
                     result["cards"].append({
                         "id": f"plan-{side.lower()}", "title": f"Plan for {side.title()}",
@@ -235,24 +238,21 @@ def build(fen: str, *, seed: str = "", live: bool = False) -> dict:
         }
         return out
 
-    # 3. out of book — the INSTANT layer: position + census facts, engine-free
+    # 3. out of book — the INSTANT layer: ONE position card (owner: a separate
+    # facts card was the same thing twice). Rows: material standing, then the
+    # census facts; the deep layer folds its eval/structure/weaknesses into
+    # the same card when it lands.
     out["statusLine"] = f"MOVE {move_no}"
     pos_rows = [{"text": material(board)["standing"], "moves": [], "squares": []}]
-    out["cards"] = [{"id": "position", "title": "Position", "count": None,
-                     "sections": [{"heading": None, "rows": pos_rows}]}]
     try:
         from .grounding_tools.facts import build_fact_sheet
-        facts = [f for f in build_fact_sheet(board, None) if f.kind != "opening"]
-        if facts:
-            out["cards"].append({
-                "id": "facts", "title": "Position Facts", "count": len(facts),
-                "sections": [{"heading": None, "rows": [
-                    {"text": f.text, "moves": [], "squares": f.squares[:3]}
-                    for f in facts
-                ]}],
-            })
+        for f in build_fact_sheet(board, None):
+            if f.kind != "opening":
+                pos_rows.append({"text": f.text, "moves": [], "squares": f.squares[:3]})
     except Exception:
         _log.warning("census facts unavailable", exc_info=True)
+    out["cards"] = [{"id": "position", "title": "Position", "count": None,
+                     "sections": [{"heading": None, "rows": pos_rows}]}]
 
     # the DEEP layer — live position only (owner: scrubs never trigger rolls)
     key = " ".join(fen.split()[:4])
@@ -261,7 +261,7 @@ def build(fen: str, *, seed: str = "", live: bool = False) -> dict:
         if deep["evalLine"]:
             pos_rows.insert(0, {"text": deep["evalLine"], "moves": [], "squares": []})
         pos_rows.extend(deep["positionRows"])
-        out["cards"] = [out["cards"][0]] + deep["cards"] + out["cards"][1:]
+        out["cards"] = [out["cards"][0]] + deep["cards"]
         out["plansPending"] = False
     elif live and _pool is not None:
         with _lock:
