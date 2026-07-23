@@ -142,7 +142,7 @@ def build_app(*, home: str, llm=None, model: str = _DEFAULT_MODEL,
     from .llm import make_adapter as _make_adapter
     _spine_llm = llm or _make_adapter({"provider": "gemini", "default_model": model})
     from . import margin as _margin_mod
-    _margin_mod.configure(pool=pool, maia=maia, llm=_spine_llm, model=model)   # deep layer + polish
+    _margin_mod.configure(pool=pool, maia=maia)   # the margin deep layer's engine access
     loop = ConversationLoop(
         store=store,
         freeform=FreeformHandler(ctx=ctx, store=store, llm=_spine_llm, model=model, ground=ground_ctx),

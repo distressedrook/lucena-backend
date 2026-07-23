@@ -51,71 +51,41 @@ _lock = threading.Lock()
 _worker = ThreadPoolExecutor(max_workers=1)   # ONE: plans rolls are heavy
 
 
-_llm = None
-_model = None
-
-
-def configure(pool, maia, llm=None, model=None) -> None:
+def configure(pool, maia) -> None:
     """Called once at server build; without it the deep layer stays off and
     the margin serves the instant layer only (tests, offline)."""
-    global _pool, _maia, _llm, _model
-    _pool, _maia, _llm, _model = pool, maia, llm, model
+    global _pool, _maia
+    _pool, _maia = pool, maia
 
 
-# -- the polish pass (owner 2026-07-24: "the sentences look unnatural") ------
-# The LLM is a LEXICALIZER here, never an analyst (house doctrine): it may
-# rephrase a grounded line, and the rewrite is verified mechanically — every
-# square/move token must already exist in the original, and no evaluation
-# word may appear that the original didn't carry. Any violation, any error,
-# any outage → the original deterministic line stands (always true).
+# -- deterministic formatting (owner 2026-07-24: no LLM — format ourselves,
+# as human-legible as possible). Rules, not rewrites: sentence case, one
+# period, parentheticals become their own rows, known sheet idioms get
+# hand-set templates, noise rows are dropped.
 
-_TOKEN_RE = re.compile(
-    r"\b(?:[a-h][1-8](?:-[a-h][1-8])?|O-O(?:-O)?|[KQRBN][a-h]?[1-8]?x?[a-h][1-8][+#]?"
-    r"|[a-h]x[a-h][1-8](?:=[QRBN])?[+#]?)\b")
-_EVAL_WORDS = ("winning", "better", "worse", "losing", "lost", "mate", "decisive", "crushing")
-
-_POLISH_SYSTEM = (
-    "You polish short grounded chess facts for a printed book margin. Rewrite "
-    "each line so it reads naturally: ONE crisp statement, at most twelve "
-    "words, no filler, no run-ons. HARD RULES: never add, remove, or soften "
-    "a chess claim; never mention a square, move, or piece the line does not "
-    "mention; never add evaluations. Keep move notation exactly as written. "
-    'Return JSON: {"lines": [string, ...]} — same count, same order.')
+_CHARACTER_BADGE = {"RAZOR": "Sharp", "SHARP": "Sharp", "LIVELY": "Dynamic",
+                    "QUIET": "Quiet", "DEAD": "Quiet"}
+_CHAR_WORD = {"razor-sharp": "SHARP", "sharp": "SHARP", "lively": "LIVELY",
+              "quiet": "QUIET", "placid": "DEAD"}
 
 
-def _tokens(s: str) -> set[str]:
-    return {m.rstrip("+#") for m in _TOKEN_RE.findall(s)}
+def _eval_badge(cp_white: int) -> str:
+    side = "White" if cp_white >= 0 else "Black"
+    mag = abs(cp_white)
+    if mag <= 15: return "Dead draw" if mag <= 8 else "Roughly equal"
+    if mag < 40: return "Roughly equal"
+    if mag < 120: return f"{side} is slightly better"
+    if mag < 300: return f"{side} is clearly better"
+    return f"{side} is winning"
 
 
-def _verified(original: str, rewrite: str) -> bool:
-    if not rewrite or len(rewrite) > min(110, max(90, len(original) + 10)):
-        return False              # a margin row is a line, never a paragraph
-    if not _tokens(rewrite) <= _tokens(original):
-        return False              # invented a square/move — hallucination by construction
-    low_o, low_r = original.lower(), rewrite.lower()
-    return all(w in low_o for w in _EVAL_WORDS if w in low_r)
-
-
-def _polish(lines: list[str]) -> list[str]:
-    """One LLM call for the batch; per-line verification; originals on any miss."""
-    if _llm is None or not lines:
-        return lines
-    try:
-        from .llm.interface import Message, GenerateOptions
-        numbered = "\n".join(f"{i + 1}. {ln}" for i, ln in enumerate(lines))
-        comp = asyncio.run(_llm.generate(
-            [Message("system", _POLISH_SYSTEM),
-             Message("user", f"Lines:\n{numbered}\n\nRespond as JSON.")],
-            GenerateOptions(model=_model, schema={"type": "object"},
-                            max_tokens=1200, temperature=0.4)))
-        out = (comp.json or {}).get("lines") or []
-    except Exception:
-        _log.warning("margin polish failed; keeping grounded lines", exc_info=True)
-        return lines
-    if len(out) != len(lines):
-        return lines
-    return [rw.strip() if isinstance(rw, str) and _verified(orig, rw.strip()) else orig
-            for orig, rw in zip(lines, out)]
+def _tidy(text: str) -> str:
+    """One legible line: trimmed, sentence-cased, single trailing period."""
+    s = " ".join(text.split()).strip().replace(" : ", ": ").replace(" ,", ",")
+    s = s.rstrip(".,;: ")
+    if s and s[0].isalpha():
+        s = s[0].upper() + s[1:]
+    return s + "." if s else s
 
 
 def _shatter(text: str, cap: int = 3) -> list[str]:
@@ -140,6 +110,23 @@ def _shatter(text: str, cap: int = 3) -> list[str]:
             out.append(s if s.endswith((".", "!", "?")) else s + ".")
     return out[:cap] if out else [text]
 
+
+def _rows_from(text: str) -> list[str]:
+    """A sheet sentence → legible rows. Parentheticals become their own rows
+    (the '(route the engine plays: f3-e5)' pattern gets its template), then
+    the remainder shatters into short statements."""
+    extras: list[str] = []
+    def _pull(m: re.Match) -> str:
+        inner = m.group(1).strip()
+        low = inner.lower()
+        if low.startswith("route the engine plays:"):
+            extras.append("Route: " + inner.split(":", 1)[1].strip())
+        elif len(inner) >= 12:
+            extras.append(inner)
+        return ""
+    main = re.sub(r"\(([^)]*)\)", _pull, text)
+    rows = [_tidy(b) for b in _shatter(main)] + [_tidy(e) for e in extras]
+    return [r for r in rows if len(r) > 3]
 
 def _plies_played(fen: str) -> int:
     """Half-moves since the start, derived from the FEN's move counters."""
@@ -206,16 +193,6 @@ def _doors(board: Board, current: str | None, cap: int = DOOR_CAP) -> list[dict]
     return doors
 
 
-def _eval_words(cp_white: int) -> str:
-    """cp (White POV) → the margin's words. Never a number (house rule)."""
-    side = "White" if cp_white >= 0 else "Black"
-    mag = abs(cp_white)
-    if mag < 40: return "Roughly equal"
-    if mag < 120: return f"{side} is slightly better"
-    if mag < 300: return f"{side} is clearly better"
-    return f"{side} is winning"
-
-
 def _sheet_sections(sheet: str) -> dict[str, list[str]]:
     """Parse the lucena-plans fact sheet (HEADER: + two-space-indented lines)
     into {header: [lines]}. Inline headers (ASSESSMENT:, STRUCTURE:) yield
@@ -239,19 +216,22 @@ def _sheet_sections(sheet: str) -> dict[str, list[str]]:
 
 
 def _deep_job(fen: str) -> None:
-    """The background pass for one live position: eval probe → route →
-    (plans sheet | loud/endgame words). Every failure caches an empty deep
-    result so the app's polling terminates."""
-    result: dict = {"evalLine": None, "cards": [], "positionRows": [], "full": False}
+    """The background pass for one live position: eval probe → badges →
+    (plans sheet | loud/endgame). All formatting is deterministic (_tidy /
+    _rows_from); the assessment becomes the two BADGES, never a row. Every
+    failure caches an empty deep result so the app's polling terminates."""
+    result: dict = {"evalBadge": None, "characterBadge": None,
+                    "cards": [], "positionRows": [], "full": False}
     try:
         from .plans import service as _plans
         board = Board(fen)
-        base_rows = [{"text": material(board)["standing"], "moves": [], "squares": []}]
+        base_rows = [{"text": _tidy(material(board)["standing"]),
+                      "moves": [], "squares": []}]
         try:
             from .grounding_tools.facts import build_fact_sheet
             for f in build_fact_sheet(board, None):
                 if f.kind != "opening":
-                    base_rows.append({"text": f.text, "moves": [],
+                    base_rows.append({"text": _tidy(f.text), "moves": [],
                                       "squares": f.squares[:3]})
         except Exception:
             pass
@@ -261,30 +241,32 @@ def _deep_job(fen: str) -> None:
             cp = a.best.score.to_ceiled_cp()
         white_to_move = " w " in f" {fen} "
         cp_white = cp if white_to_move else -cp
-        result["evalLine"] = _eval_words(cp_white)
-        result["positionRows"] = list(base_rows)
+        result["evalBadge"] = _eval_badge(cp_white)
+        rows = list(base_rows)
+        result["positionRows"] = rows
         result["full"] = True
         if abs(cp_white) <= _plans.PLANS_CP_BAND and not _plans.is_endgame(fen):
             sheet, _pid = _plans.sheet_for(fen, _pool, _maia)
             sec = _sheet_sections(sheet)
-            rows = list(base_rows)
-            result["full"] = True          # replaces the instant rows wholesale
-            if sec.get("ASSESSMENT"):
-                bits = _shatter(sec["ASSESSMENT"][0])
-                result["evalLine"] = bits[0].rstrip(".")
-                for extra in bits[1:]:
-                    rows.append({"text": extra, "moves": [], "squares": []})
-            result["positionRows"] = rows
-            if sec.get("STRUCTURE"):
-                rows.append({"text": sec["STRUCTURE"][0], "moves": [], "squares": []})
+            # ASSESSMENT → the CHARACTER badge, never a row (owner ruling)
+            assess = " ".join(sec.get("ASSESSMENT", []))
+            m = re.search(r"Character:\s*([a-z-]+)", assess)
+            if m:
+                bucket = _CHAR_WORD.get(m.group(1).lower())
+                if bucket:
+                    result["characterBadge"] = _CHARACTER_BADGE[bucket]
+            # STRUCTURE: only when the catalog actually names one — the
+            # "no textbook structure" line is noise, not a fact
+            struct = sec.get("STRUCTURE", [""])[0]
+            if struct and not struct.lower().startswith("no textbook"):
+                for bit in _rows_from(struct):
+                    rows.append({"text": bit, "moves": [], "squares": []})
             for side in ("WHITE", "BLACK"):
                 for ln in sec.get(f"WEAKNESSES FOR {side}", [])[:WEAKNESS_ROWS]:
-                    # no "White: White's ..." stutter — prefix only when the
-                    # line doesn't already name its side
-                    for j, bit in enumerate(_shatter(ln)):
-                        text = bit if j > 0 or bit.lower().startswith(side.lower()) \
-                            else f"{side.title()}: {bit}"
-                        rows.append({"text": text, "moves": [], "squares": []})
+                    for j, bit in enumerate(_rows_from(ln)):
+                        if j == 0 and not bit.lower().startswith(side.lower()):
+                            bit = f"{side.title()}: {bit[0].lower() + bit[1:]}"
+                        rows.append({"text": bit, "moves": [], "squares": []})
             for side in ("WHITE", "BLACK"):
                 lines = [ln for ln in sec.get(f"PLAN FOR {side}", [])
                          if not ln.startswith("no plan is confirmed")]
@@ -294,21 +276,9 @@ def _deep_job(fen: str) -> None:
                         "count": None,
                         "sections": [{"heading": None, "rows": [
                             {"text": bit, "moves": [], "squares": []}
-                            for ln in lines for bit in _shatter(ln)
+                            for ln in lines for bit in _rows_from(ln)
                         ]}],
                     })
-        # the polish pass — one batch over everything the deep layer wrote
-        flat = ([r["text"] for r in result["positionRows"]]
-                + [row["text"] for c in result["cards"]
-                   for s in c["sections"] for row in s["rows"]])
-        polished = _polish(flat)
-        it = iter(polished)
-        for r in result["positionRows"]:
-            r["text"] = next(it)
-        for c in result["cards"]:
-            for s in c["sections"]:
-                for row in s["rows"]:
-                    row["text"] = next(it)
     except Exception:
         _log.warning("margin deep layer failed for %s", fen, exc_info=True)
     key = " ".join(fen.split()[:4])
@@ -335,6 +305,8 @@ def build(fen: str, *, seed: str = "", live: bool = False) -> dict:
         "cards": [],
         "urgent": None,
         "commandHints": [],
+        "evalBadge": None,
+        "characterBadge": None,
     }
 
     # 1. move 1 — the book opens. The seed fallback is the DAY, never the fen
@@ -362,12 +334,12 @@ def build(fen: str, *, seed: str = "", live: bool = False) -> dict:
     # census facts; the deep layer folds its eval/structure/weaknesses into
     # the same card when it lands.
     out["statusLine"] = f"MOVE {move_no}"
-    pos_rows = [{"text": material(board)["standing"], "moves": [], "squares": []}]
+    pos_rows = [{"text": _tidy(material(board)["standing"]), "moves": [], "squares": []}]
     try:
         from .grounding_tools.facts import build_fact_sheet
         for f in build_fact_sheet(board, None):
             if f.kind != "opening":
-                pos_rows.append({"text": f.text, "moves": [], "squares": f.squares[:3]})
+                pos_rows.append({"text": _tidy(f.text), "moves": [], "squares": f.squares[:3]})
     except Exception:
         _log.warning("census facts unavailable", exc_info=True)
     out["cards"] = [{"id": "position", "title": "Position", "count": None,
@@ -383,8 +355,8 @@ def build(fen: str, *, seed: str = "", live: bool = False) -> dict:
             pos_rows = list(deep["positionRows"])
         else:
             pos_rows = pos_rows + list(deep["positionRows"])
-        if deep["evalLine"]:
-            pos_rows.insert(0, {"text": deep["evalLine"], "moves": [], "squares": []})
+        out["evalBadge"] = deep.get("evalBadge")
+        out["characterBadge"] = deep.get("characterBadge")
         out["cards"] = [{"id": "position", "title": "Position", "count": None,
                          "sections": [{"heading": None, "rows": pos_rows}]}] + deep["cards"]
         out["plansPending"] = False
