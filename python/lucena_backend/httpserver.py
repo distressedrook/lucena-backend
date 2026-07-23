@@ -480,6 +480,21 @@ def build_app(*, home: str, llm=None, model: str = _DEFAULT_MODEL,
 
         return {"ok": True, "opened": await asyncio.to_thread(_open)}
 
+    @app.post("/margin")
+    async def margin(body: dict):
+        """The margin's content for one position (mac V1_LAYOUT.md) —
+        deterministic and engine-free (lucena_backend.margin), safe to call
+        on every navigator scrub. `session_id` seeds the move-1 epigraph so
+        a session keeps its quote."""
+        from . import margin as margin_mod
+        fen = body.get("fen")
+        if not fen:
+            return JSONResponse({"error": "bad_fen"}, status_code=400)
+        try:
+            return margin_mod.build(fen, seed=str(body.get("session_id") or ""))
+        except ValueError:
+            return JSONResponse({"error": "bad_fen"}, status_code=400)
+
     @app.post("/analyze")
     async def analyze(body: dict):
         on, fen = body.get("on"), body.get("fen")
