@@ -131,6 +131,8 @@ def build_app(*, home: str, llm=None, model: str = _DEFAULT_MODEL,
     # MaiaEngine.top_human_moves holds its own lock across the whole conversation — but one predictor
     # per process is deliberate: each instance is a ~485MB torch model.)
     ground_ctx = ToolContext(store=store, pool=pool, maia=None, player_rating=rating)
+    from . import margin as _margin_mod
+    _margin_mod.configure(pool=pool, maia=maia)   # the margin deep layer's engine access
 
     # The conversation spine (LLD): one ConversationLoop routes turn+move by mode. It fully REPLACES
     # the retired Orchestrator/QuickCoach; `_dispatch` routes every turn/move through it. (Prompt
@@ -491,7 +493,8 @@ def build_app(*, home: str, llm=None, model: str = _DEFAULT_MODEL,
         if not fen:
             return JSONResponse({"error": "bad_fen"}, status_code=400)
         try:
-            return margin_mod.build(fen, seed=str(body.get("session_id") or ""))
+            return margin_mod.build(fen, seed=str(body.get("session_id") or ""),
+                                    live=bool(body.get("live")))
         except ValueError:
             return JSONResponse({"error": "bad_fen"}, status_code=400)
 
