@@ -70,10 +70,13 @@ def _deep_job(fen: str) -> None:
     key = " ".join(fen.split()[:4])
     try:
         from .plans import service as _plans
+        # No pipeline jargon in the status bar (owner: "remove the Rolling,
+        # wtf is it") — the loading placeholder already says we're reading;
+        # a finished sheet needs no "POST-VERIFY" header. None => no label.
         _pre, post = _plans.sheet_json_staged(
             fen, _pool, _maia,
-            on_pre=lambda pre: _cache(key, pre, "PRE-VERIFY · VERIFYING…", True))
-        _cache(key, post, "POST-VERIFY", False)
+            on_pre=lambda pre: _cache(key, pre, None, True))
+        _cache(key, post, None, False)
     except Exception:
         _log.warning("margin deep layer failed for %s", fen, exc_info=True)
         _cache(key, {"error": "sheet failed — see backend log"}, "ERROR", False)
@@ -196,6 +199,6 @@ def build(fen: str, *, seed: str = "", live: bool = False) -> dict:
             if key not in _inflight:
                 _inflight.add(key)
                 _worker.submit(_deep_job, fen)
-        return _blank(statusLine="ROLLING…", plansPending=True, **out)
+        return _blank(plansPending=True, **out)      # no "ROLLING…" jargon
     return _blank(statusLine=out.get("masthead") and f"OPENING · MOVE {move_no}"
                   or f"MOVE {move_no}", **out)
