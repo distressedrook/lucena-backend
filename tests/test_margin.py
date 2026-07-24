@@ -57,14 +57,15 @@ def test_move_one_serves_a_sourced_epigraph():
     assert m["theory"] is None and m["plansPending"] is False
 
 
-def test_epigraph_is_seeded_and_stable():
-    """A book keeps its epigraph: same seed -> same quote, across BOTH plies
-    of move 1 (a fen-derived seed changed it between ply 0 and ply 1)."""
-    ply1 = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 0 1"
+def test_epigraph_is_the_move_zero_cover_only():
+    """The epigraph is the MOVE-0 cover only: deterministic per session seed,
+    and GONE the instant a move is played (owner: 'when I made a move it
+    showed the quote again' — the cover must end at ply 0)."""
     a = build(START, seed="session-1")["epigraph"]
-    b = build(ply1, seed="session-1")["epigraph"]
-    assert a == b
-    assert build(START, seed="session-2")["epigraph"] != a
+    assert a and build(START, seed="session-1")["epigraph"] == a   # stable per seed
+    assert build(START, seed="session-2")["epigraph"] != a          # varies by seed
+    after_e4 = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1"
+    assert build(after_e4, seed="session-1")["epigraph"] is None     # cover ended
 
 
 def test_in_book_serves_the_authored_theory_card():
@@ -84,3 +85,96 @@ def test_in_book_serves_the_authored_theory_card():
     assert doors and all(d["san"] and d["variation"] for d in doors)
     assert len(doors) <= 4
     assert m["epigraph"] is None and m["plansPending"] is False
+
+
+# -- the Wikibooks theory gate (2026-07-24) -----------------------------------
+
+_WB_ENTRY = {
+    "name": "Some Opening", "eco": "A00",
+    "description": "A verbatim Wikibooks description of this position, long "
+                   "enough to be a real lead paragraph and not a stub remnant.",
+    "responses": ["2. Nf3 - Main line"],
+    "source_url": "https://en.wikibooks.org/wiki/Chess_Opening_Theory/x",
+}
+
+
+def test_wikibooks_entry_gates_the_sheet(monkeypatch):
+    """A position with a Wikibooks entry shows its THEORY (verbatim + CC BY-SA
+    attribution) and MUST NOT roll the positional sheet — no deep job, no
+    pending. (owner: 'don't show all the positions if it has a wikibooks
+    entry')."""
+    monkeypatch.setattr(margin.theory, "theory_for",
+                        lambda fen: _WB_ENTRY if fen == OUT_OF_BOOK else None)
+    submitted = []
+    monkeypatch.setattr(margin, "_pool", object())          # "configured"
+    monkeypatch.setattr(margin._worker, "submit",
+                        lambda *a, **k: submitted.append(a))
+    m = build(OUT_OF_BOOK, live=True)
+    assert submitted == []                                  # never rolled
+    assert m["plansPending"] is False and m["sheet"] is None
+    assert m["masthead"] == "Some Opening"
+    assert m["theory"]["idea"] and _WB_ENTRY["description"].startswith(
+        m["theory"]["idea"][:40])
+    attr = m["theory"]["attribution"]
+    assert attr and attr["url"] == _WB_ENTRY["source_url"]
+    assert "CC BY-SA" in attr["text"]
+
+
+def test_no_wikibooks_entry_still_rolls(monkeypatch):
+    """The gate is scoped to Wikibooks positions: an out-of-book position
+    WITHOUT an entry must still roll the sheet exactly as before."""
+    monkeypatch.setattr(margin.theory, "theory_for", lambda fen: None)
+    submitted = []
+    monkeypatch.setattr(margin, "_pool", object())
+    monkeypatch.setattr(margin, "_inflight", set())
+    monkeypatch.setattr(margin._worker, "submit",
+                        lambda *a, **k: submitted.append(a))
+    m = build(OUT_OF_BOOK, live=True)
+    assert m["plansPending"] is True                        # rolled as before
+    assert len(submitted) == 1
+
+
+def test_named_without_annotation_falls_back_to_wikibooks(monkeypatch):
+    """A position with an opening NAME but no authored annotation must still
+    use the Wikibooks description + attribution — authored-first, Wikibooks-
+    otherwise, independent of whether a name exists."""
+    monkeypatch.setattr(margin.openings, "name_for", lambda fen: "Some Named Line")
+    monkeypatch.setattr(margin.authored, "annotation_for", lambda name: None)
+    monkeypatch.setattr(margin.theory, "theory_for",
+                        lambda fen: _WB_ENTRY if fen == OUT_OF_BOOK else None)
+    m = build(OUT_OF_BOOK, seed="s")
+    assert m["masthead"] == "Some Named Line"          # name wins the masthead
+    assert m["theory"]["idea"] == _WB_ENTRY["description"]   # VERBATIM, full
+    attr = m["theory"]["attribution"]
+    assert attr and attr["url"] == _WB_ENTRY["source_url"]
+
+
+def test_wikibooks_idea_is_verbatim_not_truncated(monkeypatch):
+    """The Wikibooks lead is shown as-is (CC BY-SA 'as-is' contract) — never
+    passed through _lead_sentences."""
+    long_desc = ("First sentence of theory. Second sentence adds nuance. "
+                 "Third sentence closes it out.")
+    entry = {**_WB_ENTRY, "description": long_desc}
+    monkeypatch.setattr(margin.openings, "name_for", lambda fen: None)
+    monkeypatch.setattr(margin.theory, "theory_for",
+                        lambda fen: entry if fen == OUT_OF_BOOK else None)
+    m = build(OUT_OF_BOOK, seed="s")
+    assert m["theory"]["idea"] == long_desc            # full, untruncated
+
+
+def test_unattributable_wikibooks_is_not_theory_and_still_rolls(monkeypatch):
+    """A Wikibooks entry WITHOUT source_url can't be shown (CC BY-SA needs the
+    credit), so it is NOT treated as theory: no empty card, and the positional
+    sheet still rolls."""
+    no_src = {"name": "X", "description": "text", "responses": []}   # no source_url
+    monkeypatch.setattr(margin.openings, "name_for", lambda fen: None)
+    monkeypatch.setattr(margin.theory, "theory_for",
+                        lambda fen: no_src if fen == OUT_OF_BOOK else None)
+    submitted = []
+    monkeypatch.setattr(margin, "_pool", object())
+    monkeypatch.setattr(margin, "_inflight", set())
+    monkeypatch.setattr(margin._worker, "submit",
+                        lambda *a, **k: submitted.append(a))
+    m = build(OUT_OF_BOOK, live=True)
+    assert m["theory"] is None                     # not gated behind an empty card
+    assert m["plansPending"] is True and len(submitted) == 1   # rolls as normal

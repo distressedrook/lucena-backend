@@ -145,3 +145,37 @@ def test_plans_read_gates(pool, monkeypatch):
                 raise RuntimeError("down")
         assert await _handler(_Ground(40, Dead()))._plans_read(MID) is None
     asyncio.run(main())
+
+
+def test_theory_preempts_drill_and_plans(monkeypatch):
+    """IN THEORY takes precedence over everything (owner: 'if in theory, show
+    theory'): a position with an attributed Wikibooks entry shows the theory
+    text and NEVER reaches the drill preview or the plans read — even when the
+    position is drillable."""
+    from lucena_backend.coaching import freeform as F
+    from lucena_backend.coaching.loop import Handled
+
+    entry = {"name": "X", "description": "Verbatim theory lead.",
+             "responses": [], "source_url": "https://en.wikibooks.org/wiki/x"}
+    monkeypatch.setattr(F.theory, "theory_for", lambda fen: entry)
+
+    class Ctx:
+        maia = None
+        drill_calls = 0
+        def preview_drill(self, fen):        # would be drillable — must be skipped
+            self.drill_calls += 1
+            return {"drillable": True, "tree": {}}
+
+    ctx = Ctx()
+    h = F.FreeformHandler(ctx=ctx, store=None, llm=None, model="m",
+                          ground=_Ground(40))
+    said = []
+    h._say = lambda t: said.append(t)
+
+    async def main():
+        out = await h._read_position(MID, played=None)
+        assert isinstance(out, Handled)          # theory, NOT EnterCoach(puzzle)
+        assert ctx.drill_calls == 0              # drill preview never reached
+        assert said and "Verbatim theory lead." in said[0]
+        assert "Wikibooks" in said[0]            # CC BY-SA attribution present
+    asyncio.run(main())

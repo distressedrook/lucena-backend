@@ -31,6 +31,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from lucena_core import content as authored
 from lucena_core import openings
+from lucena_core import theory
 from lucena_core.board import Board
 
 _log = logging.getLogger(__name__)
@@ -178,34 +179,56 @@ def build(fen: str, *, seed: str = "", live: bool = False) -> dict:
     plies = _plies_played(fen)
     move_no = (plies // 2) + 1
 
-    # THE AUTHORED FIELDS ARE ADDITIVE, never a short-circuit. They were
-    # staged as early returns first (faithful to fb4b2d7) and that BROKE
-    # THE APP: mac's MarginContent decodes only {statusLine, raw, sheet,
-    # plansPending} — it has no masthead/epigraph/theory — so every move-1
-    # and in-book position rendered blank. A wire contract is owned by its
-    # CONSUMER; new fields ride alongside the old ones until the client
-    # decodes them.
     out: dict = {}
 
-    # move 1 — the book opens. (Seed fallback is the DAY, never the fen: a
-    # fen seed changed the quote between ply 0 and ply 1.)
-    if plies <= 1:
+    # MOVE 0 (the starting position, ply 0 only) — the book opens: ONLY the
+    # epigraph, nothing else (owner: "move 0, just the quote, centered" — and
+    # "when I made a move it showed the quote again": the cover ends the
+    # instant a move is played). An early return, so no theory/positional
+    # competes with the quote. Seeded by SESSION so it never churns.
+    if plies == 0:
         import datetime
         q = authored.epigraph(seed or datetime.date.today().isoformat())
-        out["epigraph"] = {"quote": q["quote"], "author": q["author"],
-                           "source": q.get("source")}
+        return _blank(epigraph={"quote": q["quote"], "author": q["author"],
+                                "source": q.get("source")})
 
-    # in book — the authored theory card.
+    # IN THEORY — the theory card. An AUTHORED annotation leads when we have
+    # one (higher curation, our own prose); otherwise the verbatim Wikibooks
+    # lead, shown as-is with its CC BY-SA attribution (never model-adapted).
+    # Wikibooks is FEN-keyed, so it also names positions the authored table
+    # skips — the card appears wherever either source knows the position.
     name = openings.name_for(fen)
-    if name:
-        idea = authored.annotation_for(name)
-        out["masthead"] = name
+    wb = theory.theory_for(fen)
+    # "In theory" = a known opening NAME, or an ATTRIBUTABLE Wikibooks entry.
+    # An entry without source_url can't be shown (CC BY-SA needs the credit),
+    # so it is NOT theory — fall through to the positional read rather than
+    # gate the sheet off behind an empty card.
+    if name or (wb and wb.get("source_url")):
+        idea = authored.annotation_for(name) if name else None
+        attribution = None
+        if idea:
+            idea = _lead_sentences(idea, IDEA_SENTENCES)   # authored: lead only
+        elif wb and wb.get("source_url"):
+            # Wikibooks: VERBATIM (the harvest already extracted only the lead
+            # paragraph — do NOT truncate it further, that breaks the "shown
+            # as-is" contract). Only ever with attribution: CC BY-SA REQUIRES
+            # the credit + link, so no source_url -> no quoted text.
+            idea = wb["description"]
+            attribution = {"text": "Wikibooks · CC BY-SA",
+                           "url": wb["source_url"]}
+        out["masthead"] = name or wb.get("name")
         out["theory"] = {
-            "idea": _lead_sentences(idea, IDEA_SENTENCES) if idea else None,
-            "doors": _doors(board, name)}
+            "idea": idea,
+            "doors": _doors(board, name) if name else [],
+            "attribution": attribution}
+        # IN THEORY -> remove our positional stuff (owner: "if in theory,
+        # remove our positional stuff"). The position is theoretical (named
+        # or Wikibooks-covered); show the THEORY, never the positional read.
+        # Skip the deep plans job entirely — no roll, no sheet, no badges.
+        return _blank(statusLine=f"OPENING · MOVE {move_no}", **out)
 
-    # the plans layer — unchanged, and still runs for EVERY position, so
-    # sheet/raw/plansPending keep behaving exactly as the client expects.
+    # out of book — the plans layer (unchanged; runs for every position that
+    # is NOT in theory, so sheet/raw/plansPending behave as before).
     key = " ".join(fen.split()[:4])
     cached = _deep_cache.get(key)
     if cached is not None:

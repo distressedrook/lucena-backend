@@ -14,6 +14,7 @@ import asyncio
 import logging
 
 from lucena_core import openings
+from lucena_core import theory
 
 from .. import plans as _plans
 from .book_voice import (_BOOK_RATING, _BOOK_REPLIES, _COACH, _ENDBOOK, _NARRATE, _book_route, _is_swing)
@@ -30,6 +31,19 @@ _log = logging.getLogger(__name__)
 def _mover(fen) -> str:
     """The colour that just moved FROM `fen` — i.e. `fen`'s side to move."""
     return "Black" if (fen and " b " in f" {fen} ") else "White"
+
+
+def _theory_text(entry: dict) -> str:
+    """A Wikibooks theory entry as user-facing text: the opening name, the
+    verbatim description, its named continuations, and the REQUIRED CC BY-SA
+    attribution/link. Deterministic — no model touches this text (verbatim
+    display keeps share-alike clear of our prose)."""
+    name = entry.get("name") or "This position"
+    lines = [f"**{name}**", "", (entry.get("description") or "").strip()]
+    if resp := (entry.get("responses") or []):
+        lines += ["", "Main continuations: " + "; ".join(resp[:5]) + "."]
+    lines += ["", f"— Theory from Wikibooks (CC BY-SA): {entry['source_url']}"]
+    return "\n".join(lines)
 
 
 class FreeformHandler(HandlerBase):
@@ -71,6 +85,16 @@ class FreeformHandler(HandlerBase):
         instantly), a deterministic nudge says so, and the turn continues as
         a normal read.
         """
+        # IN THEORY takes precedence over everything (owner: "if in theory,
+        # show theory"). A book position shows its Wikibooks theory — not a
+        # positional read, and not a tactical drill (which would otherwise
+        # EnterCoach below and bury the theory). Verbatim + CC BY-SA
+        # attribution, deterministic, no LLM. Only presented when we can
+        # ATTRIBUTE it: CC BY-SA requires the source link, so an entry without
+        # source_url is never shown (never quote the text uncredited).
+        if (entry := theory.theory_for(fen)) is not None and entry.get("source_url"):
+            self._say(_theory_text(entry))
+            return Handled()
         preview = await asyncio.to_thread(self.ctx.preview_drill, fen)
         if isinstance(preview, dict) and preview.get("drillable"):
             self.store.save_lesson_spec(puzzle_spec(fen, preview["tree"]))
