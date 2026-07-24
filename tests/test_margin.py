@@ -68,23 +68,38 @@ def test_epigraph_is_the_move_zero_cover_only():
     assert build(after_e4, seed="session-1")["epigraph"] is None     # cover ended
 
 
-def test_in_book_serves_the_authored_theory_card():
+def test_in_book_prefers_wikibooks_over_authored():
+    """WIKIBOOKS FIRST (owner): even where we HAVE an authored annotation, an
+    attributed Wikibooks entry is shown instead — with its CC BY-SA credit —
+    and never the authored prose. The opening name still leads the masthead
+    and the authored doors still show continuations."""
     m = build(SICILIAN, seed="s")
-    assert m["masthead"] == "Sicilian Defense"
+    assert m["masthead"] == "Sicilian Defense"          # name wins the masthead
     assert m["statusLine"] == "OPENING · MOVE 2"
     idea = m["theory"]["idea"]
     assert idea and "Sicilian" in idea
-    # the card takes the LEAD sentences, not the whole essay. (Don't count
-    # "." — move notation like "1.e4" contains one; _lead_sentences only
-    # breaks on a period followed by whitespace, which is why it survives.)
+    attr = m["theory"]["attribution"]                    # Wikibooks, attributed
+    assert attr and "Wikibooks" in attr["text"]
+    assert attr["url"].startswith("https://en.wikibooks.org/")
     from lucena_core import content as authored
-    full = authored.annotation_for("Sicilian Defense")
-    assert len(idea) < len(full)
-    assert full.startswith(idea[:40])
+    assert idea != authored.annotation_for("Sicilian Defense")   # NOT our prose
     doors = m["theory"]["doors"]
     assert doors and all(d["san"] and d["variation"] for d in doors)
     assert len(doors) <= 4
     assert m["epigraph"] is None and m["plansPending"] is False
+
+
+def test_authored_used_only_when_no_wikibooks(monkeypatch):
+    """Authored annotation is the FALLBACK — used only where Wikibooks has no
+    entry — and carries no attribution (it is our own prose)."""
+    monkeypatch.setattr(margin.theory, "theory_for", lambda fen: None)
+    m = build(SICILIAN, seed="s")
+    assert m["masthead"] == "Sicilian Defense"
+    idea = m["theory"]["idea"]
+    from lucena_core import content as authored
+    full = authored.annotation_for("Sicilian Defense")
+    assert idea and full.startswith(idea[:40])           # the authored lead
+    assert m["theory"]["attribution"] is None            # our prose, no credit
 
 
 # -- the Wikibooks theory gate (2026-07-24) -----------------------------------

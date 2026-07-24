@@ -204,19 +204,22 @@ def build(fen: str, *, seed: str = "", live: bool = False) -> dict:
     # so it is NOT theory — fall through to the positional read rather than
     # gate the sheet off behind an empty card.
     if name or (wb and wb.get("source_url")):
-        idea = authored.annotation_for(name) if name else None
+        idea = None
         attribution = None
-        if idea:
-            idea = _lead_sentences(idea, IDEA_SENTENCES)   # authored: lead only
-        elif wb and wb.get("source_url"):
-            # Wikibooks: VERBATIM (the harvest already extracted only the lead
-            # paragraph — do NOT truncate it further, that breaks the "shown
-            # as-is" contract). Only ever with attribution: CC BY-SA REQUIRES
-            # the credit + link, so no source_url -> no quoted text.
+        if wb and wb.get("source_url"):
+            # WIKIBOOKS FIRST (owner: the wiki theory is the point — don't let
+            # an authored annotation shadow it). VERBATIM: the harvest already
+            # extracted only the lead paragraph, so it is shown as-is, never
+            # truncated further. Always with its required CC BY-SA credit+link.
             idea = wb["description"]
             attribution = {"text": "Wikibooks · CC BY-SA",
                            "url": wb["source_url"]}
-        out["masthead"] = name or wb.get("name")
+        elif name:
+            # only where Wikibooks has nothing: fall back to our authored
+            # annotation (lead sentences), our own prose so no attribution.
+            a = authored.annotation_for(name)
+            idea = _lead_sentences(a, IDEA_SENTENCES) if a else None
+        out["masthead"] = name or (wb or {}).get("name")
         out["theory"] = {
             "idea": idea,
             "doors": _doors(board, name) if name else [],
