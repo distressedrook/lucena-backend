@@ -36,7 +36,6 @@ from lucena_core.board import Board
 
 _log = logging.getLogger(__name__)
 
-DOOR_CAP = 4          # labeled continuations shown on the theory card
 IDEA_SENTENCES = 2    # authored annotations are essays; the card takes the lead
 
 # -- plumbing (configured once by httpserver) ---------------------------------
@@ -103,49 +102,6 @@ def _lead_sentences(text: str, n: int) -> str:
                 break
     return " ".join(out) if out else text.strip()
 
-
-def _doors(board: Board, current: str | None, cap: int = DOOR_CAP) -> list[dict]:
-    """Named continuations: each legal move whose resulting position the
-    openings table can name. Ordered THEORY-FIRST, not legal-move-order
-    (caught in tests: a b3 sideline stole 'Scandinavian Defense' from exd5):
-    moves that stay in the current opening's family come first, deeper
-    variation names before generic ones. Typicality (Maia %) is a later wire."""
-    family = (current or "").split(":")[0].strip()
-
-    def best_grandchild_name(child: Board) -> str | None:
-        """The openings table skips forced intermediate positions (after
-        2.exd5 the name lives on 2...Qxd5) — look one reply deeper and take
-        the strongest name by the same family-first, most-specific order."""
-        names = []
-        for reply in child.legal_moves():
-            n = openings.name_for(child.apply(reply).fen)
-            if n:
-                names.append(n)
-        if not names:
-            return None
-        names.sort(key=lambda n: (0 if family and n.startswith(family) else 1,
-                                  -len(n), n))
-        return names[0]
-
-    found = []
-    for uci in board.legal_moves():
-        child = board.apply(uci)
-        name = openings.name_for(child.fen) or best_grandchild_name(child)
-        if name:
-            found.append((uci, name))
-    # family continuations first; within a bucket, more specific (longer)
-    # names first — the mainline door names the deepest known theory.
-    found.sort(key=lambda p: (0 if family and p[1].startswith(family) else 1,
-                              -len(p[1]), p[1]))
-    doors, seen = [], set()
-    for uci, name in found:
-        if name in seen:
-            continue
-        seen.add(name)
-        doors.append({"san": board.san(uci), "variation": name, "typicalPct": None})
-        if len(doors) >= cap:
-            break
-    return doors
 
 
 def _blank(**over) -> dict:
@@ -220,10 +176,8 @@ def build(fen: str, *, seed: str = "", live: bool = False) -> dict:
             a = authored.annotation_for(name)
             idea = _lead_sentences(a, IDEA_SENTENCES) if a else None
         out["masthead"] = name or (wb or {}).get("name")
-        out["theory"] = {
-            "idea": idea,
-            "doors": _doors(board, name) if name else [],
-            "attribution": attribution}
+        # continuations dropped (owner): the card is the theory prose only.
+        out["theory"] = {"idea": idea, "doors": [], "attribution": attribution}
         # IN THEORY -> remove our positional stuff (owner: "if in theory,
         # remove our positional stuff"). The position is theoretical (named
         # or Wikibooks-covered); show the THEORY, never the positional read.

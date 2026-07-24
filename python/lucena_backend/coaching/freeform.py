@@ -40,8 +40,6 @@ def _theory_text(entry: dict) -> str:
     display keeps share-alike clear of our prose)."""
     name = entry.get("name") or "This position"
     lines = [f"**{name}**", "", (entry.get("description") or "").strip()]
-    if resp := (entry.get("responses") or []):
-        lines += ["", "Main continuations: " + "; ".join(resp[:5]) + "."]
     lines += ["", f"— Theory from Wikibooks (CC BY-SA): {entry['source_url']}"]
     return "\n".join(lines)
 

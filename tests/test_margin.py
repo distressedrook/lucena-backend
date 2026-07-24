@@ -83,9 +83,7 @@ def test_in_book_prefers_wikibooks_over_authored():
     assert attr["url"].startswith("https://en.wikibooks.org/")
     from lucena_core import content as authored
     assert idea != authored.annotation_for("Sicilian Defense")   # NOT our prose
-    doors = m["theory"]["doors"]
-    assert doors and all(d["san"] and d["variation"] for d in doors)
-    assert len(doors) <= 4
+    assert m["theory"]["doors"] == []                            # continuations dropped
     assert m["epigraph"] is None and m["plansPending"] is False
 
 
