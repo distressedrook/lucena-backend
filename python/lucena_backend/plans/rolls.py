@@ -27,13 +27,25 @@ line at any depth, the equality is just noisier.
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import random
 
 from lucena_core.board import Board
 
-MAIN_NODES = int(os.environ.get("LUCENA_PLANS_MAIN_NODES", 1_000_000))
-EXT_NODES = int(os.environ.get("LUCENA_PLANS_EXT_NODES", 250_000))
+_log = logging.getLogger(__name__)
+
+# LIVE budgets (2026-07-24, owner: "13s is way too much"). The research
+# calibration ran at 1M/250k; live that measured ~13s per fresh position,
+# and MarginLiveView's poll is `.task(id: fen)` — it CANCELS the moment the
+# position changes, so at 13s a roll never finished while you were playing
+# and the plans appeared to "stop arriving". 300k/80k lands ~5s.
+# TRADEOFF, stated plainly: this is a shallower search than the one the
+# verify gate's lift/confirmation numbers were measured at, so a marginal
+# plan may fail to confirm that would have confirmed at 1M. Restore the
+# research budget with LUCENA_PLANS_MAIN_NODES=1000000 (env still wins).
+MAIN_NODES = int(os.environ.get("LUCENA_PLANS_MAIN_NODES", 300_000))
+EXT_NODES = int(os.environ.get("LUCENA_PLANS_EXT_NODES", 80_000))
 HORIZON = 30       # covers the slow families that matter (minority 30);
                    # verify truncates per family, so fast families still
                    # read their own natural window. 40 measured +4-5s for
@@ -65,6 +77,10 @@ def roll_engine(engine, fen: str, *, horizon: int = HORIZON,
     try:
         a = engine.analyse(fen, multipv=multipv, nodes=main_nodes)
     except Exception:
+        # visible, not silent (2026-07-24 fix): a None engine leg makes the
+        # whole sheet unverified, so the caller (service.sheet_json_for)
+        # treats it as a plans-read failure and falls back to the plain read.
+        _log.warning("roll_engine: analyse failed for %s", fen, exc_info=True)
         return None
     white = fen.split()[1] == "w"
     pvs = []
@@ -118,6 +134,9 @@ def roll_maia(maia, fen: str, *, horizon: int = HORIZON, k: int = K,
                          random.Random(base * 100 + i))
                 for i in range(k)]
     except Exception:
+        # Maia is the optional leg (verify degrades to engine), but a genuine
+        # rollout failure should still be visible, not swallowed (2026-07-24).
+        _log.warning("roll_maia: rollout failed for %s", fen, exc_info=True)
         return None
 
 

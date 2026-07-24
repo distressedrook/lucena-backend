@@ -21,7 +21,7 @@ from .grounding import _brief, _brief_move, _numbered
 from .handler_base import HandlerBase
 from .lesson import puzzle_spec
 from .loop import EnterCoach, Handled, Outcome
-from .mode_prompts import FreeformPrompt, PlansReadPrompt, PositionQueryPrompt, ReadPrompt
+from .mode_prompts import FreeformPrompt, PositionQueryPrompt, ReadPrompt
 from .prompts import EndbookPrompt, NarratePrompt
 
 _log = logging.getLogger(__name__)
@@ -56,7 +56,7 @@ class FreeformHandler(HandlerBase):
         ruling 2026-07-24: a move on the board goes through the same path as
         conversation). Route (2026-07-22): drillable → coach; quiet + out of
         book + MIDDLEGAME + equalish (|eval| <= 1.5) → the PLANS layer
-        (lucena-plans fact sheet narrated by PlansReadPrompt); everything
+        (lucena-plans sheet, presented deterministically — no LLM); everything
         else → the plain grounded read. `played` threads the just-played move
         into the plain read's prose; the in-book case never reaches here from
         the move path (the book-voice arm routes first).
@@ -93,9 +93,17 @@ class FreeformHandler(HandlerBase):
     async def _plans_read(self, fen) -> str | None:
         """The PLANS layer: for a quiet, out-of-book MIDDLEGAME position inside the equalish band
         (|eval| <= 1.5 pawns — the zone where 'find a tactic' has no answer and the coaching value
-        is a plan), roll engine lines from this position, hand (fen, pvs, rolls) to lucena-plans'
-        fact sheet, and narrate it. Returns None when any gate fails or the layer errors — the
-        caller falls back to the plain grounded read; this path must never break the turn."""
+        is a plan), roll engine lines from this position, hand (fen, pvs, rolls) to lucena-plans,
+        and PRESENT the result deterministically. Returns None when any gate fails or the layer
+        errors — the caller falls back to the plain grounded read; this path must never break the
+        turn.
+
+        NO LLM IS IN THIS PATH (owner ruling 2026-07-24). The read used to be narrated by
+        `PlansReadPrompt`; it is now rendered by `lucena-plans` `position_read.render`. The
+        motivating reason is not latency but CORRECTNESS: the reliability tier ("never mention an
+        unverified plan") used to be an instruction inside a prompt — the only thing keeping an
+        unconfirmed candidate away from a student was a sentence a model could drift from. It is
+        now a filter in code."""
         if not fen or _plans.is_endgame(fen):
             return None
         # The eval gate reads the same cached analyse the fallback's _ground would run (focus="eval"
@@ -113,16 +121,10 @@ class FreeformHandler(HandlerBase):
             # leg only when the process has no MaiaEngine at all (LUCENA_MAIA unset).
             _pre, post = await asyncio.to_thread(
                 _plans.sheet_json_for, fen, self.ground._pool, self.ctx.maia)
-            import json as _json
-            sheet = _json.dumps(post, indent=2)
+            return await asyncio.to_thread(_plans.render_position_read, post)
         except Exception:  # noqa: BLE001 — a missing checkout / engine hiccup degrades, never breaks
             _log.warning("plans layer unavailable; falling back to plain read", exc_info=True)
             return None
-        out = await self._gen_json(PlansReadPrompt.system(),
-                                   PlansReadPrompt.prompt(sheet=sheet),
-                                   max_tokens=800,   # six headed sections need the headroom
-                                   temperature=1.0)  # varied prose across repeated reads
-        return (out or {}).get("text")
 
     async def _on_move(self, inp) -> Outcome:
         pre_fen = inp.fen or self.store.board_view

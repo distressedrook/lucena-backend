@@ -8,4 +8,5 @@ verified fact sheet (service.py). The conversation loop gates entry
 the equalish band.
 """
 
-from .service import sheet_for, sheet_json_for, is_endgame, PLANS_CP_BAND  # noqa: F401
+from .service import (sheet_for, sheet_json_for, render_position_read,  # noqa: F401
+                       is_endgame, PLANS_CP_BAND)

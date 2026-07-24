@@ -27,6 +27,21 @@ from .rolls import roll_engine, roll_maia
 
 PLANS_CP_BAND = 150     # |eval| <= this (cp, either POV) counts as equalish
 
+
+class PlansRollError(RuntimeError):
+    """The engine leg failed to produce lines — a plans-read failure, not a
+    degraded sheet. Raised so the caller (freeform._plans_read) falls back to
+    the plain grounded read rather than narrating an all-unverified sheet."""
+
+
+def _require_engine(pvs):
+    """A None engine leg means every plan comes out unverified — surface it as
+    a failure (2026-07-24 fix), not a silent engine-less sheet. The Maia leg
+    may still be None (verify degrades to engine); the engine leg may not."""
+    if pvs is None:
+        raise PlansRollError("engine roll produced no lines")
+    return pvs
+
 # Non-pawn material per side; the middlegame gate. A side at Q+minor /
 # R+R+minor or less (<= 13) has entered the technical phase — with BOTH
 # sides there, plans-vocabulary coaching (which is calibrated on
@@ -66,7 +81,7 @@ def sheet_for(fen: str, pool, maia=None, *, horizon: int | None = None
     """
     kw = {"horizon": horizon} if horizon else {}
     with pool.lease() as engine:
-        pvs = roll_engine(engine, fen, **kw)
+        pvs = _require_engine(roll_engine(engine, fen, **kw))
     rolls = roll_maia(maia, fen, **kw)
     _bootstrap()
     from fact_sheet import build_fact_sheet   # lucena-plans, flat module
@@ -81,7 +96,7 @@ def sheet_json_for(fen: str, pool, maia=None, *, horizon: int | None = None
     calls, post runs the verify gate. Blocking; call off-thread."""
     kw = {"horizon": horizon} if horizon else {}
     with pool.lease() as engine:
-        pvs = roll_engine(engine, fen, **kw)
+        pvs = _require_engine(roll_engine(engine, fen, **kw))
     rolls = roll_maia(maia, fen, **kw)
     _bootstrap()
     from fact_sheet import pre_verify_json, post_verify_json
@@ -95,7 +110,7 @@ def sheet_json_staged(fen: str, pool, maia=None, *, horizon: int | None = None,
     the verify gate and returns (pre, post). Blocking; call off-thread."""
     kw = {"horizon": horizon} if horizon else {}
     with pool.lease() as engine:
-        pvs = roll_engine(engine, fen, **kw)
+        pvs = _require_engine(roll_engine(engine, fen, **kw))
     rolls = roll_maia(maia, fen, **kw)
     _bootstrap()
     from fact_sheet import pre_verify_json, post_verify_json
@@ -103,3 +118,15 @@ def sheet_json_staged(fen: str, pool, maia=None, *, horizon: int | None = None,
     if on_pre is not None:
         on_pre(pre)
     return pre, post_verify_json(fen, pvs, rolls)
+
+
+def render_position_read(post: dict) -> str | None:
+    """The post-verify sheet, presented DETERMINISTICALLY for the reader
+    (owner ruling 2026-07-24 — no LLM in this path; the verified-plans
+    reliability gate is a code filter now, not a prompt instruction).
+    None when there is nothing worth showing; the caller falls back to
+    its plain read. Pure formatting — cheap, but called off-thread with
+    the roll anyway."""
+    _bootstrap()
+    from position_read import render     # lucena-plans, flat module
+    return render(post)

@@ -107,12 +107,14 @@ class _Ctx:
 
 
 def _handler(ground):
+    """No LLM stub any more (owner ruling 2026-07-24: the plans read is
+    presented deterministically). `_gen_json` is wired to explode instead —
+    if anything ever puts a model back on this path, the test says so."""
     h = FreeformHandler(ctx=_Ctx(), store=None, llm=None, model="m", ground=ground)
 
-    async def fake_gen(system, prompt, **kw):
-        assert "FACT SHEET" in system
-        return {"text": "narrated"}
-    h._gen_json = fake_gen
+    async def no_llm(system, prompt, **kw):
+        raise AssertionError("the plans read must not call an LLM")
+    h._gen_json = no_llm
     return h
 
 
@@ -128,9 +130,15 @@ def test_plans_read_gates(pool, monkeypatch):
         # outside the equalish band: refused after the probe
         g = _Ground(320)
         assert await _handler(g)._plans_read(MID) is None and g.calls == 1
-        # inside the band: rolled, sheeted, narrated
+        # inside the band: rolled, sheeted, RENDERED deterministically
         out = await _handler(_Ground(40, pool))._plans_read(MID)
-        assert out == "narrated"
+        assert isinstance(out, str) and out.strip()
+        # it is the deterministic read, not model prose: an assessment
+        # sentence up front and per-side blocks below
+        assert "**White**" in out or "**Black**" in out
+        # the model-facing artifacts are gone from the user's text
+        assert "POSITION-" not in out
+        assert MID.split()[0] not in out, "FEN must never reach the reader"
         # layer failure (dead pool) degrades to None -> plain read fallback
         class Dead:
             def lease(self):

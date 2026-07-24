@@ -5,7 +5,8 @@ built here, never hand-assembled in the handlers.
 
   - FreeformPrompt      classify + answer a free-chat turn (dual-role)
   - ReadPrompt          grounded read of a quiet position / a move-explain
-  - PlansReadPrompt     narrates the lucena-plans fact sheet (equalish out-of-book middlegame)
+  (PlansReadPrompt RETIRED 2026-07-24 — the plans position read is presented
+   deterministically by lucena-plans `position_read.render`, no LLM in that path.)
   - CoachTurnPrompt     classify a coach-mode text turn
   - VerdictPrompt       coach feedback on a bit answer — symmetric (right AND wrong)
   - PositionQueryPrompt answer a player's QUESTION about the current position (both modes)
@@ -107,84 +108,6 @@ class ReadPrompt:
         played = san_guard(played)                               # SAN on the wire
         head = f"{played} was just played.\n" if played else ""
         return f"{head}Grounded facts (read ONLY from these):\n{facts}\n\nRespond as JSON."
-
-
-class PlansReadPrompt:
-    """Narrates a lucena-plans FACT SHEET for a quiet, equalish, out-of-book MIDDLEGAME position
-    (the plans-layer route in freeform `_on_position`). The sheet is pre-grounded end-to-end —
-    assessment, structure, weaknesses are board geometry; the PLAN sections are verified against
-    engine lines rolled from THIS position — so the model's whole job is translation, zero chess.
-    Output: {text}."""
-
-    _TIERS = (
-        "The fact sheet is JSON. It has two reliability tiers — keep them distinct:\n"
-        "- plans.white / plans.black entries with verified=true have been checked against real "
-        "engine analysis for this exact position. Treat these as confirmed; make them the heart "
-        "of your explanation. NEVER mention an entry with verified=false or verified=null — "
-        "unconfirmed candidates are data, not coaching. The advisory entries may be mentioned "
-        "as general guidance.\n"
-        "- Everything else (assessment, reads, structure, weaknesses) is true board "
-        "geometry, but not individually engine-checked — don't imply a listed weakness is "
-        "currently winning or forcing unless a verified plan says so.\n"
-    )
-    _RULES = (
-        "Every fact is labeled for a specific side; a weaknesses.white item is a liability for "
-        "White (same for black), never an asset — don't invert it. A fact belongs ONLY in that "
-        "side's part of the story — when the prose is flowing and unheaded it's easy to let a "
-        "stray fact drift into the wrong side's sentence; before finishing, check every "
-        "square/piece you named against which weaknesses/plans list it actually came from. "
-        "Don't invent anything not stated (piece locations, moves, tactics, threats, "
-        "evaluations). Plain words only: no centipawns, win%, JSON field names, or internal "
-        "jargon (verdict codes, effect numbers, maia_frac), and never mention the position id "
-        "or the fact sheet itself.\n"
-    )
-    # 2026-07-22 rewrite: the headed-bullets layout read like a textbook entry, not a coach
-    # talking; then fixed to 4 flowing paragraphs at a ~300-word budget (player-specified).
-    # Same required CONTENT as before (character, both sides' weaknesses, both sides' plans
-    # with timing, structure theory when named), now grouped by BEAT rather than by side — each
-    # paragraph covers both colours where relevant, in sentences, never headings or bullets.
-    # The THEORY paragraph is still the one place the model may speak from its own knowledge —
-    # and only about the structure the sheet NAMES (the same carve-out as opening narration:
-    # ideas and typical plans, never concrete lines, evals, or verdicts of its own).
-    _SHAPE = (
-        "FORMATTING: Markdown, but used sparingly. Separate the four paragraphs with a blank "
-        "line (a real paragraph break in the rendered output, not just a sentence pause) — this "
-        "is the one formatting requirement that matters most, so double-check `text` actually "
-        "contains it between every paragraph. **Bold** is allowed for a genuine highlight — the "
-        "one square, move, or idea that's actually the crux of that paragraph — never as a "
-        "pseudo-heading and never applied on reflex; most paragraphs need zero bold at all. No "
-        "bullet lists, no # headers, no other markdown. Each paragraph is a coach talking through "
-        "that part of the position out loud, sentences connected by ordinary language ('Which is "
-        "exactly why...', 'The trouble for Black is...'), never a topic label or a list.\n"
-        "Write EXACTLY four paragraphs, in this order, about 300 words total:\n"
-        "1. Summary — the assessment and the position's character (from the sheet's Character "
-        "line), the hook for what kind of fight this actually is.\n"
-        "2. Weakness — both sides' weaknesses in one paragraph, told as their respective "
-        "troubles, not two separate lists stapled together. Skip a side with nothing listed "
-        "rather than inventing one.\n"
-        "3. Plan — both sides' plans, what each is reaching for, keeping any timing the sheet "
-        "gives (now vs longer-term) as part of the sentence, not a label.\n"
-        "4. Theory — ONLY if the sheet names a STRUCTURE: standard textbook understanding of it "
-        "from your own knowledge, the typical ideas for each side, connected to what you've "
-        "already said in paragraphs 2-3 where they agree. If no structure is named, fold "
-        "paragraph 3's content into a 3-paragraph reply instead — never invent a structure to "
-        "fill this slot.\n"
-        'Return JSON: {"text": string}.'
-    )
-
-    @classmethod
-    def system(cls) -> str:
-        return ("You are a chess coach reading a middlegame position on a shared analysis "
-                "board. Below you'll get a FACT SHEET for it — your only source; you have no board "
-                "or engine access. The sheet's ASSESSMENT line includes the position's CHARACTER "
-                "(quiet / dynamic / sharp...) with its evidence — let that set your tone: a sharp "
-                "equal position is not 'calm', it is a knife edge.\n"
-                + cls._TIERS + cls._RULES + _perspective(freeform=True)
-                + cls._SHAPE)
-
-    @classmethod
-    def prompt(cls, *, sheet: str) -> str:
-        return f"FACT SHEET (read ONLY from this):\n{sheet}\n\nRespond as JSON."
 
 
 class CoachTurnPrompt:
