@@ -70,9 +70,20 @@ def _stream_preroll(fen: str, session_id: str) -> None:
     """The PRE phase, streamed (owner 2026-07-25): every feature the fast
     geometry detects goes out as a margin_progress event with its squares —
     the app cycles the highlights while the rolls grind. Failures are
-    swallowed: the loading stream must never take the sheet down."""
+    swallowed: the loading stream must never take the sheet down.
+
+    NOT in the opening (owner 2026-07-25: "don't stream when in opening
+    phase") — early positions have no formed structure and the feature
+    cycle is noise; the roll still runs, the app just shows the plain
+    reading line until the sheet lands."""
     if _publish is None or not session_id:
         return
+    try:
+        from lucena_core.reads import game_phase
+        if game_phase(fen)["phase"] == "opening":
+            return
+    except Exception:
+        pass          # phase read failed -> fall through and stream anyway
     try:
         from .plans.service import _bootstrap
         _bootstrap()

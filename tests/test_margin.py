@@ -307,3 +307,19 @@ def test_roll_submit_failure_clears_inflight_for_retry(monkeypatch):
     finally:
         margin._deep_cache.clear(); margin._inflight.clear()
         margin.configure(pool=None, maia=None)
+
+
+def test_no_preroll_stream_in_the_opening():
+    # owner 2026-07-25: "don't stream when in opening phase" — early
+    # out-of-book positions get no feature cycle (the roll still runs).
+    events = []
+    margin.configure(pool=None, maia=None,
+                     publish=lambda p, *, session_id: events.append(p))
+    try:
+        opening = "rnbqkb1r/pppp1ppp/5n2/4p3/2P5/6P1/PP1PPP1P/RNBQKBNR w KQkq - 0 3"
+        margin._stream_preroll(opening, "s1")
+        assert events == []                              # opening -> silent
+        margin._stream_preroll(OUT_OF_BOOK, "s1")        # developed middlegame
+        assert events and events[0]["stage"] == "pawns"  # ...streams
+    finally:
+        margin.configure(pool=None, maia=None)
