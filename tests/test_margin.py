@@ -250,3 +250,60 @@ def test_raising_publisher_never_corrupts_a_successful_sheet(monkeypatch):
     finally:
         margin._deep_cache.clear()
         margin.configure(pool=None, maia=None)
+
+
+def test_preroll_streams_from_the_request_thread_not_the_roll_worker(monkeypatch):
+    # the fast PRE phase must fire from build(), decoupled from the serialized
+    # roll worker (owner 2026-07-25: stream stopped when rolls backed up)
+    calls = []
+    margin.configure(pool=object(), maia=None, publish=lambda p, *, session_id: None)
+    monkeypatch.setattr(margin._worker, "submit", lambda *a, **k: None)
+    monkeypatch.setattr(margin, "_stream_preroll",
+                        lambda fen, sid: calls.append((fen, sid)))
+    try:
+        m = margin.build(OUT_OF_BOOK, seed="sess-1", live=True)
+        assert m["plansPending"] is True
+        assert calls == [(OUT_OF_BOOK, "sess-1")]      # streamed once, upstream
+        margin.build(OUT_OF_BOOK, seed="sess-1", live=True)  # a poll retry
+        assert len(calls) == 1                          # inflight -> no re-stream
+    finally:
+        margin._deep_cache.clear(); margin._inflight.clear()
+        margin.configure(pool=None, maia=None)
+
+
+def test_all_pre_events_precede_done(monkeypatch):
+    # Codex P1: a fast/immediate worker must not publish `done` ahead of the
+    # PRE stream — pre-roll is emitted BEFORE the roll is submitted.
+    events = []
+    margin.configure(pool=object(), maia=None,
+                     publish=lambda p, *, session_id: events.append(p))
+
+    def two_pre(fen, sid):
+        for i in range(2):
+            margin._publish({"fen": fen, "i": i, "stage": "pawns"}, session_id=sid)
+    monkeypatch.setattr(margin, "_stream_preroll", two_pre)
+    monkeypatch.setattr(margin._worker, "submit", lambda fn, *a: fn(*a))  # inline
+    import lucena_backend.plans.service as svc
+    monkeypatch.setattr(svc, "sheet_json_staged",
+                        lambda fen, pool, maia, on_pre: (None, {"ok": True}))
+    try:
+        margin.build(OUT_OF_BOOK, seed="s1", live=True)
+        assert [e.get("stage") for e in events] == ["pawns", "pawns", "done"]
+    finally:
+        margin._deep_cache.clear(); margin._inflight.clear()
+        margin.configure(pool=None, maia=None)
+
+
+def test_roll_submit_failure_clears_inflight_for_retry(monkeypatch):
+    margin.configure(pool=object(), maia=None, publish=lambda p, *, session_id: None)
+    monkeypatch.setattr(margin, "_stream_preroll", lambda fen, sid: None)
+    def boom(*a, **k):
+        raise RuntimeError("executor down")
+    monkeypatch.setattr(margin._worker, "submit", boom)
+    key = " ".join(OUT_OF_BOOK.split()[:4])
+    try:
+        margin.build(OUT_OF_BOOK, seed="s1", live=True)
+        assert key not in margin._inflight        # cleared -> a later poll retries
+    finally:
+        margin._deep_cache.clear(); margin._inflight.clear()
+        margin.configure(pool=None, maia=None)

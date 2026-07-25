@@ -86,10 +86,11 @@ def _stream_preroll(fen: str, session_id: str) -> None:
 
 
 def _deep_job(fen: str, session_id: str = "") -> None:
-    """Roll once; publish PRE the moment it exists, POST when verify lands.
-    Every failure caches a terminal result so the app's polling terminates."""
+    """The ROLL phase only (the PRE stream is fired upstream, from the request
+    thread — see build). Roll once; cache POST when verify lands; end the
+    loading stream. Every failure caches a terminal result so the app's
+    polling terminates."""
     key = " ".join(fen.split()[:4])
-    _stream_preroll(fen, session_id)
     try:
         from .plans import service as _plans
         # No pipeline jargon in the status bar (owner: "remove the Rolling,
@@ -232,10 +233,28 @@ def build(fen: str, *, seed: str = "", live: bool = False) -> dict:
         return _blank(statusLine=cached["statusLine"], sheet=cached["sheet"],
                       raw=cached["raw"], plansPending=cached["pending"], **out)
     if live and _pool is not None:
+        submitted = False
         with _lock:
             if key not in _inflight:
                 _inflight.add(key)
+                submitted = True
+        if submitted:
+            # PRE streams from the REQUEST thread, NOT the (serialized,
+            # single-worker) roll queue — the fast geometry phase must never
+            # wait behind the slow roll backlog (owner 2026-07-25: "works for
+            # a couple of turns then stops" = the pre-roll was gated behind
+            # the roll worker). Fires once per position, in fen order.
+            # Stream BEFORE submitting the roll: an immediate/fast worker must
+            # not publish `done` ahead of the PRE events (Codex P1) — so the
+            # `done` the queued job emits always follows the whole PRE stream.
+            _stream_preroll(fen, seed)
+            try:
                 _worker.submit(_deep_job, fen, seed)
+            except Exception:
+                with _lock:
+                    _inflight.discard(key)   # let a later poll retry the roll
+                _log.warning("margin roll submit failed for %s", fen,
+                             exc_info=True)
         return _blank(plansPending=True, **out)      # no "ROLLING…" jargon
     return _blank(statusLine=out.get("masthead") and f"OPENING · MOVE {move_no}"
                   or f"MOVE {move_no}", **out)
