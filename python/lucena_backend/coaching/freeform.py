@@ -122,10 +122,11 @@ class FreeformHandler(HandlerBase):
 
         NO LLM IS IN THIS PATH (owner ruling 2026-07-24). The read used to be narrated by
         `PlansReadPrompt`; it is now rendered by `lucena-plans` `position_read.render`. The
-        motivating reason is not latency but CORRECTNESS: the reliability tier ("never mention an
-        unverified plan") used to be an instruction inside a prompt — the only thing keeping an
-        unconfirmed candidate away from a student was a sentence a model could drift from. It is
-        now a filter in code."""
+        motivating reason is not latency but CORRECTNESS: the reliability tier used to be an
+        instruction inside a prompt — the only thing telling a student how good a plan's evidence
+        was is a sentence a model could drift from. It is now computed in code and PRINTED with
+        every plan (owner 2026-07-25: every detected plan is surfaced, tagged engine-confirmed /
+        strong-human / structural — see position_read's docstring for why hiding them was worse)."""
         if not fen or _plans.is_endgame(fen):
             return None
         # The eval gate reads the same cached analyse the fallback's _ground would run (focus="eval"
