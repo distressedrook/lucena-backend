@@ -13,13 +13,17 @@ ctx.play_move; `/drill` arms a forcing-line drill on a position.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import logging
 import os
 import re
+import threading
 
 from fastapi import FastAPI, Header, WebSocket, WebSocketDisconnect
 from starlette.responses import JSONResponse
 
 from lucena_engine.uci import Engine
+from lucena_core.board import Board
 from . import auth
 from .engine_io.enginepool import EnginePool, SingleEnginePool, default_size
 from .persistence.state import StateStore
@@ -66,6 +70,14 @@ _DEFAULT_MODEL = os.environ.get("LUCENA_MODEL", "gemini-flash-lite-latest")
 # Engine pool sizing. Every knob is explicit and env-overridable because the cost is real and per
 # instance: `size` concurrent analyses, each a Stockfish process holding `hash_mb`. The floor is
 # size × hash_mb of RAM — the release checklist says to size this against real load, not a guess.
+# LIVE ANALYSIS (2026-07-26, owner: "hook it up with the engine ... it should
+# show 4 pv"). The Analysis panel deepens on its OWN Stockfish process — a
+# continuous search must never sit in the shared pool, where it would starve
+# interactive moves and the margin's rolls. One thread by default, like the
+# poisoned-line detector, for the same reason.
+_log = logging.getLogger(__name__)
+_LIVE_MULTIPV = int(os.environ.get("LUCENA_LIVE_MULTIPV", "4"))
+_LIVE_THREADS = int(os.environ.get("LUCENA_LIVE_THREADS", "1"))
 _POOL_SIZE = int(os.environ.get("LUCENA_POOL_SIZE") or default_size())
 _POOL_THREADS = int(os.environ.get("LUCENA_POOL_THREADS", "1"))
 _POOL_HASH_MB = int(os.environ.get("LUCENA_POOL_HASH_MB", "64"))
@@ -110,7 +122,22 @@ def _make_maia():
 
 def build_app(*, home: str, llm=None, model: str = _DEFAULT_MODEL,
               rating: int = 1500, engine=None) -> FastAPI:
-    app = FastAPI(title="lucena-backend")
+    # The live analyzer's holder is created BEFORE the app so the lifespan can
+    # close over it (see _analyzer below). A lifespan, not @on_event: the event
+    # decorators are deprecated and warn on every build.
+    _live: dict = {"analyzer": None, "failed": False}
+    _live_lock = threading.Lock()
+
+    @contextlib.asynccontextmanager
+    async def _lifespan(_app):
+        yield
+        # Kill the dedicated engine with the server — an orphaned Stockfish
+        # would keep a core busy for as long as the machine is up.
+        a = _live["analyzer"]
+        if a is not None:
+            a.stop()
+
+    app = FastAPI(title="lucena-backend", lifespan=_lifespan)
     db = DB(os.path.join(home, "lucena"))
     store = StateStore(home, db=db)
     # A bounded pool, shared by both contexts: engines are fungible (new_game() on acquire), so a
@@ -131,6 +158,27 @@ def build_app(*, home: str, llm=None, model: str = _DEFAULT_MODEL,
     # MaiaEngine.top_human_moves holds its own lock across the whole conversation — but one predictor
     # per process is deliberate: each instance is a ~485MB torch model.)
     ground_ctx = ToolContext(store=store, pool=pool, maia=None, player_rating=rating)
+
+    # THE LIVE ANALYZER (wired 2026-07-26; the class existed but nothing ever
+    # constructed it, so /analyze was a stub and the Analysis panel never had
+    # an engine behind it). Started on FIRST USE, not at build: a server that
+    # is never asked to analyze — every test, an offline run — must not spawn
+    # a Stockfish process. A failure to start degrades the route, never the
+    # app: the panel simply shows no lines.
+    def _analyzer():
+        with _live_lock:
+            if _live["analyzer"] is None and not _live["failed"]:
+                try:
+                    from .grounding_tools.live_analysis import LiveAnalyzer
+                    a = LiveAnalyzer(Engine(threads=_LIVE_THREADS), store,
+                                     multipv=_LIVE_MULTIPV)
+                    a.start()
+                    _live["analyzer"] = a
+                except Exception:
+                    _live["failed"] = True      # no engine here; don't retry per keystroke
+                    _log.warning("live analyzer unavailable", exc_info=True)
+            return _live["analyzer"]
+
 
 
     # The conversation spine (LLD): one ConversationLoop routes turn+move by mode. It fully REPLACES
@@ -512,9 +560,43 @@ def build_app(*, home: str, llm=None, model: str = _DEFAULT_MODEL,
 
     @app.post("/analyze")
     async def analyze(body: dict):
-        on, fen = body.get("on"), body.get("fen")
-        # Live analysis toggle is a follow-up; accept the call so the app doesn't 404.
-        return {"ok": True, "on": bool(on), "fen": fen}
+        """Point the live analyzer at a position (or turn it off).
+
+        The FEN is whatever the app is SHOWING — a mainline ply, a scrub, or a
+        variation the user built (owner 2026-07-26: the analysis section must
+        support variations). Nothing here knows or cares which: the panel
+        analyzes the board in front of you.
+        """
+        on, fen = bool(body.get("on")), body.get("fen")
+        try:
+            sid = await _rest_sid(body.get("session_id"))
+        except PermissionError:
+            return _forbidden()
+        # VALIDATE HERE, like /margin: the analyzer's deepen loop retries its
+        # target immediately when a search raises, so handing it a FEN the
+        # engine rejects would spin the dedicated thread until the next target
+        # arrived. A bad board is a 400, not a busy engine.
+        if on and fen:
+            try:
+                Board(fen)
+            except ValueError:
+                return JSONResponse({"error": "bad_fen"}, status_code=400)
+        # `on` with no fen is meaningless — and set_target(None) is how the
+        # loop is told to idle, so an off switch and a missing board coincide.
+        target = fen if (on and fen) else None
+        if target is None:
+            # Never spawn an engine to say "stop": an off switch, or a panel
+            # opening before the board exists, must not start Stockfish (and
+            # must not be able to trip the permanent failed flag either).
+            existing = _live["analyzer"]
+            if existing is not None:
+                await asyncio.to_thread(existing.set_target, None, False, session_id=sid)
+            return {"ok": True, "on": False, "fen": fen}
+        analyzer = await asyncio.to_thread(_analyzer)   # first call spawns a process
+        if analyzer is None:
+            return {"ok": False, "on": False, "fen": fen}
+        await asyncio.to_thread(analyzer.set_target, target, True, session_id=sid)
+        return {"ok": True, "on": True, "fen": fen}
 
     @app.get("/config")
     async def config():

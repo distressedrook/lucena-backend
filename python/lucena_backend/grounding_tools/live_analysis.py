@@ -79,6 +79,14 @@ class LiveAnalyzer:
             try:
                 analysis = self._engine.analyse(fen, depth=depth, multipv=self._multipv)
             except Exception:
+                # A search that raises must not become a hot loop: `_run` would
+                # re-enter with the same still-on target immediately. Idle on
+                # this target until it changes (2026-07-26; the route also
+                # rejects an unparseable FEN, this is the backstop for the rest
+                # — an engine that died, a position it refuses).
+                with self._cond:
+                    while not self._stopped and gen == self._gen:
+                        self._cond.wait()
                 return
             with self._cond:
                 if self._stopped or gen != self._gen:   # target changed mid-search — drop this result
