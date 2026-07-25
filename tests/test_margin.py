@@ -1,6 +1,8 @@
 """The /margin content builder — JSON-inspection mode (owner, 2026-07-23):
 the margin shows the plans layer's raw pre/post-verify JSON. The former
 card builder (epigraph/theory/position cards) lives at backend fb4b2d7."""
+import time
+
 import pytest
 
 from lucena_backend import margin
@@ -10,8 +12,13 @@ START = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 OUT_OF_BOOK = "r2q1rk1/pp1bbppp/2n1pn2/2pp4/3P1B2/2NBPN2/PPP2PPP/R2Q1RK1 w - - 4 9"
 
 
-def test_unconfigured_margin_is_bare_and_never_pends():
-    m = build(OUT_OF_BOOK)                     # no pool configured, not live
+def test_unconfigured_margin_is_bare_and_never_pends(monkeypatch):
+    # `_pool` is set EXPLICITLY here (2026-07-26): with the live/scrub gate
+    # gone, a configured pool is the only thing standing between a request
+    # and a roll, so this test has to state the unconfigured premise itself
+    # rather than lean on another test not having configured the module.
+    monkeypatch.setattr(margin, "_pool", None)
+    m = build(OUT_OF_BOOK)
     assert m["raw"] is None and m["plansPending"] is False
 
 
@@ -122,7 +129,7 @@ def test_wikibooks_entry_gates_the_sheet(monkeypatch):
     monkeypatch.setattr(margin, "_pool", object())          # "configured"
     monkeypatch.setattr(margin._worker, "submit",
                         lambda *a, **k: submitted.append(a))
-    m = build(OUT_OF_BOOK, live=True)
+    m = build(OUT_OF_BOOK)
     assert submitted == []                                  # never rolled
     assert m["plansPending"] is False and m["sheet"] is None
     assert m["masthead"] == "Some Opening"
@@ -142,7 +149,7 @@ def test_no_wikibooks_entry_still_rolls(monkeypatch):
     monkeypatch.setattr(margin, "_inflight", set())
     monkeypatch.setattr(margin._worker, "submit",
                         lambda *a, **k: submitted.append(a))
-    m = build(OUT_OF_BOOK, live=True)
+    m = build(OUT_OF_BOOK)
     assert m["plansPending"] is True                        # rolled as before
     assert len(submitted) == 1
 
@@ -188,7 +195,7 @@ def test_unattributable_wikibooks_is_not_theory_and_still_rolls(monkeypatch):
     monkeypatch.setattr(margin, "_inflight", set())
     monkeypatch.setattr(margin._worker, "submit",
                         lambda *a, **k: submitted.append(a))
-    m = build(OUT_OF_BOOK, live=True)
+    m = build(OUT_OF_BOOK)
     assert m["theory"] is None                     # not gated behind an empty card
     assert m["plansPending"] is True and len(submitted) == 1   # rolls as normal
 
@@ -206,6 +213,11 @@ def test_deep_job_publishes_done_on_success(monkeypatch):
     monkeypatch.setattr(svc, "sheet_json_staged",
                         lambda fen, pool, maia, on_pre: (None, {"ok": True}))
     key = " ".join(OUT_OF_BOOK.split()[:4])
+    # the tested position must BE this session's latest (2026-07-26):
+    # _deep_job drops a job the user has navigated away from, so a direct
+    # call has to state that premise or it silently exercises nothing.
+    monkeypatch.setattr(margin, "_latest_by_session",
+                        {"sess-1": (key, __import__("time").monotonic())})
     try:
         margin._deep_job(OUT_OF_BOOK, "sess-1")
         assert events[-1][1]["stage"] == "done" and events[-1][0] == "sess-1"
@@ -225,6 +237,11 @@ def test_deep_job_publishes_done_on_failure_too(monkeypatch):
         raise RuntimeError("roll failed")
     monkeypatch.setattr(svc, "sheet_json_staged", boom)
     key = " ".join(OUT_OF_BOOK.split()[:4])
+    # the tested position must BE this session's latest (2026-07-26):
+    # _deep_job drops a job the user has navigated away from, so a direct
+    # call has to state that premise or it silently exercises nothing.
+    monkeypatch.setattr(margin, "_latest_by_session",
+                        {"sess-1": (key, __import__("time").monotonic())})
     try:
         margin._deep_job(OUT_OF_BOOK, "sess-1")
         assert events[-1][1]["stage"] == "done"
@@ -243,6 +260,11 @@ def test_raising_publisher_never_corrupts_a_successful_sheet(monkeypatch):
     monkeypatch.setattr(svc, "sheet_json_staged",
                         lambda fen, pool, maia, on_pre: (None, {"ok": True}))
     key = " ".join(OUT_OF_BOOK.split()[:4])
+    # the tested position must BE this session's latest (2026-07-26):
+    # _deep_job drops a job the user has navigated away from, so a direct
+    # call has to state that premise or it silently exercises nothing.
+    monkeypatch.setattr(margin, "_latest_by_session",
+                        {"sess-1": (key, __import__("time").monotonic())})
     try:
         margin._deep_job(OUT_OF_BOOK, "sess-1")
         assert margin._deep_cache[key]["pending"] is False
@@ -261,10 +283,10 @@ def test_preroll_streams_from_the_request_thread_not_the_roll_worker(monkeypatch
     monkeypatch.setattr(margin, "_stream_preroll",
                         lambda fen, sid: calls.append((fen, sid)))
     try:
-        m = margin.build(OUT_OF_BOOK, seed="sess-1", live=True)
+        m = margin.build(OUT_OF_BOOK, seed="sess-1")
         assert m["plansPending"] is True
         assert calls == [(OUT_OF_BOOK, "sess-1")]      # streamed once, upstream
-        margin.build(OUT_OF_BOOK, seed="sess-1", live=True)  # a poll retry
+        margin.build(OUT_OF_BOOK, seed="sess-1")  # a poll retry
         assert len(calls) == 1                          # inflight -> no re-stream
     finally:
         margin._deep_cache.clear(); margin._inflight.clear()
@@ -287,7 +309,7 @@ def test_all_pre_events_precede_done(monkeypatch):
     monkeypatch.setattr(svc, "sheet_json_staged",
                         lambda fen, pool, maia, on_pre: (None, {"ok": True}))
     try:
-        margin.build(OUT_OF_BOOK, seed="s1", live=True)
+        margin.build(OUT_OF_BOOK, seed="s1")
         assert [e.get("stage") for e in events] == ["pawns", "pawns", "done"]
     finally:
         margin._deep_cache.clear(); margin._inflight.clear()
@@ -302,7 +324,7 @@ def test_roll_submit_failure_clears_inflight_for_retry(monkeypatch):
     monkeypatch.setattr(margin._worker, "submit", boom)
     key = " ".join(OUT_OF_BOOK.split()[:4])
     try:
-        margin.build(OUT_OF_BOOK, seed="s1", live=True)
+        margin.build(OUT_OF_BOOK, seed="s1")
         assert key not in margin._inflight        # cleared -> a later poll retries
     finally:
         margin._deep_cache.clear(); margin._inflight.clear()
@@ -335,9 +357,173 @@ def test_in_book_position_does_not_stream():
     monkeypatch_free = margin._stream_preroll
     margin._stream_preroll = lambda fen, sid: calls.append(fen)  # type: ignore
     try:
-        m = build(IN_BOOK, seed="s1", live=True)
+        m = build(IN_BOOK, seed="s1")
         assert m["theory"] is not None and calls == []   # theory card, no stream
     finally:
         margin._stream_preroll = monkeypatch_free
         margin._deep_cache.clear(); margin._inflight.clear()
         margin.configure(pool=None, maia=None)
+
+
+# -- every position gets the cycle; latest-wins protects the worker ----------
+# (owner 2026-07-26: "Variations must go through the same cycle as well.
+# Nothing is happening when there is a variation.")
+
+def test_a_variation_rolls_just_like_the_live_position(monkeypatch):
+    """The deep pass used to be gated on a `live` flag, so a variation or a
+    scrub sat on the instant layer forever. Every out-of-book position the
+    margin is asked about now submits a roll."""
+    variation = "r2q1rk1/pp1bbppp/2n1pn2/2pp4/3P1B2/2NBPN2/PPP1QPPP/R4RK1 b - - 5 9"
+    monkeypatch.setattr(margin.theory, "theory_for", lambda fen: None)
+    submitted = []
+    monkeypatch.setattr(margin, "_pool", object())
+    monkeypatch.setattr(margin, "_inflight", set())
+    monkeypatch.setattr(margin, "_stream_preroll", lambda fen, sid: None)
+    monkeypatch.setattr(margin._worker, "submit",
+                        lambda fn, fen, sid: submitted.append(fen))
+    try:
+        assert build(OUT_OF_BOOK)["plansPending"] is True
+        assert build(variation)["plansPending"] is True
+        assert submitted == [OUT_OF_BOOK, variation]
+    finally:
+        margin._deep_cache.clear()
+
+
+def test_a_stale_job_drops_instead_of_rolling(monkeypatch):
+    """LATEST-WINS: scrubbing past a position must not spend 5s of engine on
+    it. The dropped job clears its inflight mark, so coming back re-submits
+    (the app polls every 1.5-2.5s)."""
+    rolled = []
+    import lucena_backend.plans.service as svc
+    monkeypatch.setattr(svc, "sheet_json_staged",
+                        lambda fen, pool, maia, on_pre: (rolled.append(fen),
+                                                         {"ok": True})[1])
+    stale_key = " ".join(OUT_OF_BOOK.split()[:4])
+    monkeypatch.setattr(margin, "_inflight", {stale_key})
+    monkeypatch.setattr(margin, "_latest_by_session",
+                        {"s1": ("somewhere else entirely", time.monotonic())})
+    try:
+        margin._deep_job(OUT_OF_BOOK, "s1")
+        assert rolled == []                          # never rolled
+        assert stale_key not in margin._inflight     # ...and retryable
+        assert margin._deep_cache == {}              # nothing cached either
+        # the same job IS rolled once it is that session's latest again
+        margin._latest_by_session["s1"] = (stale_key, time.monotonic())
+        margin._deep_job(OUT_OF_BOOK, "s1")
+        assert rolled == [OUT_OF_BOOK]
+    finally:
+        margin._deep_cache.clear()
+
+
+def test_one_session_never_cancels_another_session_s_roll(monkeypatch):
+    """Latest-wins is per SESSION (Codex): two windows navigating at once must
+    not starve each other. Session A's queued job still rolls after session B
+    has asked for a different position."""
+    other = "r2q1rk1/pp1bbppp/2n1pn2/2pp4/3P1B2/2NBPN2/PPP1QPPP/R4RK1 b - - 5 9"
+    rolled = []
+    import lucena_backend.plans.service as svc
+    monkeypatch.setattr(svc, "sheet_json_staged",
+                        lambda fen, pool, maia, on_pre: (rolled.append(fen),
+                                                         {"ok": True})[1])
+    monkeypatch.setattr(margin.theory, "theory_for", lambda fen: None)
+    monkeypatch.setattr(margin, "_pool", object())
+    monkeypatch.setattr(margin, "_inflight", set())
+    monkeypatch.setattr(margin, "_latest_by_session", {})
+    monkeypatch.setattr(margin, "_stream_preroll", lambda fen, sid: None)
+    monkeypatch.setattr(margin._worker, "submit", lambda *a, **k: None)  # queue it
+    try:
+        margin.build(OUT_OF_BOOK, seed="A")      # session A asks for A's fen
+        margin.build(other, seed="B")            # session B moves on elsewhere
+        margin._deep_job(OUT_OF_BOOK, "A")       # A's queued job finally runs
+        assert rolled == [OUT_OF_BOOK]           # ...and still rolls
+    finally:
+        margin._deep_cache.clear()
+
+
+def test_a_second_window_on_the_same_position_keeps_the_roll_alive(monkeypatch):
+    """The roll belongs to the POSITION, not to whoever submitted it (Codex):
+    A and B both sit on X, A navigates away, and X must still roll for B —
+    without waiting for B's next poll."""
+    other = "r2q1rk1/pp1bbppp/2n1pn2/2pp4/3P1B2/2NBPN2/PPP1QPPP/R4RK1 b - - 5 9"
+    key = " ".join(OUT_OF_BOOK.split()[:4])
+    rolled = []
+    import lucena_backend.plans.service as svc
+    monkeypatch.setattr(svc, "sheet_json_staged",
+                        lambda fen, pool, maia, on_pre: (rolled.append(fen),
+                                                         {"ok": True})[1])
+    # A and B are both on X; then A moves on to `other`. B's latest is still X.
+    monkeypatch.setattr(margin, "_inflight", {key})
+    monkeypatch.setattr(margin, "_latest_by_session",
+                        {"A": (" ".join(other.split()[:4]), time.monotonic()),
+                         "B": (key, time.monotonic())})
+    try:
+        margin._deep_job(OUT_OF_BOOK, "A")       # submitted by A, wanted by B
+        assert rolled == [OUT_OF_BOOK]
+    finally:
+        margin._deep_cache.clear()
+
+
+def test_navigating_to_an_in_book_position_also_drops_the_queued_job(monkeypatch):
+    """Latest-wins is recorded on EVERY request (Codex): walking from an
+    out-of-book position into theory (or into an already-cached position) is
+    still walking away, so the queued roll for the old position must drop."""
+    key = " ".join(OUT_OF_BOOK.split()[:4])
+    rolled = []
+    import lucena_backend.plans.service as svc
+    monkeypatch.setattr(svc, "sheet_json_staged",
+                        lambda fen, pool, maia, on_pre: (rolled.append(fen),
+                                                         {"ok": True})[1])
+    monkeypatch.setattr(margin, "_pool", object())
+    monkeypatch.setattr(margin, "_inflight", set())
+    monkeypatch.setattr(margin, "_latest_by_session", {})
+    monkeypatch.setattr(margin, "_stream_preroll", lambda fen, sid: None)
+    monkeypatch.setattr(margin._worker, "submit", lambda *a, **k: None)   # queue it
+    monkeypatch.setattr(margin.theory, "theory_for",
+                        lambda fen: None if fen == OUT_OF_BOOK else _WB_ENTRY)
+    try:
+        assert margin.build(OUT_OF_BOOK, seed="A")["plansPending"] is True
+        margin.build(SICILIAN, seed="A")             # ...into theory
+        margin._deep_job(OUT_OF_BOOK, "A")           # the job finally runs
+        assert rolled == []                          # nobody is there any more
+        assert key not in margin._inflight           # and it stays retryable
+    finally:
+        margin._deep_cache.clear()
+
+
+def test_many_live_sessions_all_keep_their_own_rolls(monkeypatch):
+    """Interest is pruned by AGE, never by count (Codex): a count cap evicts
+    by arrival order, so a session still sitting on a position could have its
+    own roll dropped as unwanted. 40 live sessions, and the oldest one's job
+    still rolls; a session that stopped asking an hour ago does not keep one
+    alive."""
+    key = " ".join(OUT_OF_BOOK.split()[:4])
+    rolled = []
+    import lucena_backend.plans.service as svc
+    monkeypatch.setattr(svc, "sheet_json_staged",
+                        lambda fen, pool, maia, on_pre: (rolled.append(fen),
+                                                         {"ok": True})[1])
+    monkeypatch.setattr(margin, "_pool", object())
+    monkeypatch.setattr(margin, "_inflight", set())
+    monkeypatch.setattr(margin, "_latest_by_session", {})
+    monkeypatch.setattr(margin, "_stream_preroll", lambda fen, sid: None)
+    monkeypatch.setattr(margin._worker, "submit", lambda *a, **k: None)
+    monkeypatch.setattr(margin.theory, "theory_for", lambda fen: None)
+    try:
+        margin.build(OUT_OF_BOOK, seed="first")          # the oldest session
+        for i in range(40):                              # 40 more arrive after
+            margin.build(OUT_OF_BOOK, seed=f"s{i}")
+        margin._deep_job(OUT_OF_BOOK, "first")
+        assert rolled == [OUT_OF_BOOK]                   # still wanted
+
+        # ...but an entry older than the TTL is gone, and keeps nothing alive
+        rolled.clear()
+        margin._deep_cache.clear()
+        # ...and the WORKER prunes too, so no later request is needed: an
+        # expired interest cannot keep a roll alive through a quiet period.
+        stale = time.monotonic() - margin._INTEREST_TTL - 1
+        monkeypatch.setattr(margin, "_latest_by_session", {"ghost": (key, stale)})
+        margin._deep_job(OUT_OF_BOOK, "ghost")
+        assert rolled == []
+        assert "ghost" not in margin._latest_by_session
+    finally:
+        margin._deep_cache.clear()

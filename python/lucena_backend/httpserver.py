@@ -486,17 +486,27 @@ def build_app(*, home: str, llm=None, model: str = _DEFAULT_MODEL,
 
     @app.post("/margin")
     async def margin(body: dict):
-        """The margin's content for one position (mac V1_LAYOUT.md) —
-        deterministic and engine-free (lucena_backend.margin), safe to call
-        on every navigator scrub. `session_id` seeds the move-1 epigraph so
-        a session keeps its quote."""
+        """The margin's content for one position (mac V1_LAYOUT.md). The
+        instant layer is deterministic and engine-free; the deep layer rolls
+        in the background for EVERY position it is asked about — variations
+        and scrubs included (2026-07-26) — protected by margin.py's
+        latest-wins rule rather than by a live/scrub flag. `session_id` seeds
+        the move-1 epigraph so a session keeps its quote."""
         from . import margin as margin_mod
         fen = body.get("fen")
         if not fen:
             return JSONResponse({"error": "bad_fen"}, status_code=400)
+        # Resolve the chat the same way every other REST route does, rather
+        # than trusting the body verbatim: an omitted session_id must fall
+        # back to THIS user's active chat, not to a shared empty-string
+        # bucket, and a foreign one must be refused. The seed is load-bearing
+        # now — it addresses the pre-roll stream and keys latest-wins.
         try:
-            return margin_mod.build(fen, seed=str(body.get("session_id") or ""),
-                                    live=bool(body.get("live")))
+            sid = await _rest_sid(body.get("session_id"))
+        except PermissionError:
+            return _forbidden()
+        try:
+            return margin_mod.build(fen, seed=sid)
         except ValueError:
             return JSONResponse({"error": "bad_fen"}, status_code=400)
 

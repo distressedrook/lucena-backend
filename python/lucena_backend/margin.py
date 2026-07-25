@@ -18,8 +18,22 @@ authored lookups + board geometry, engine-free, safe on every navigator
 scrub, and carrying NO model output — the annotations are human-authored and
 source-checked, not generated per turn.
 
-Results are cached per position; the deep pass runs for the LIVE position
-only (scrubs never trigger rolls — standing rule).
+Results are cached per position. EVERY position gets the full cycle —
+pre-roll stream, roll, verify, tagged plans — including a variation or a
+scrub (owner 2026-07-26: "variations must go through the same cycle as well.
+Nothing is happening when there is a variation"). The old standing rule ran
+the deep pass for the LIVE game position only, which is why a variation sat
+on the instant layer forever.
+
+What protects the single roll worker now is LATEST-WINS, not a live/scrub
+distinction: `_latest_by_session` records the position each session most
+recently asked for, and a queued job returns immediately unless SOME session
+is still on that position. Dropping it also clears its inflight mark, so the
+app's next poll re-submits — scrubbing fast costs nothing, and stopping
+anywhere rolls that position. Testing every session's latest (rather than
+only the one that submitted the job) is what stops one window cancelling
+another's roll; the sheets stay cached per position, so the same FEN is
+computed once no matter who asked.
 """
 
 from __future__ import annotations
@@ -27,6 +41,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 from lucena_core import content as authored
@@ -44,6 +59,15 @@ _maia = None          # MaiaEngine | None (plans verify degrades without it)
 _publish = None       # state.publish_margin_progress | None (loading stream)
 _deep_cache: dict[str, dict] = {}      # norm fen -> {"raw", "statusLine", "pending"}
 _inflight: set[str] = set()
+# session id -> (key of the position that session most recently asked for,
+# when it asked). Per SESSION, not global: two windows must not cancel each
+# other's rolls (a process-wide latest let session B's navigation starve
+# session A). Pruned by AGE, never by count (Codex): a count cap evicts by
+# arrival order, which can drop a session that is still sitting on a position
+# and let its own roll be cancelled as unwanted. A live session re-stamps its
+# entry on every poll (1.5-2.5s), so only genuinely gone ones expire.
+_latest_by_session: dict[str, tuple[str, float]] = {}
+_INTEREST_TTL = 600.0        # seconds; ~4 orders of magnitude above the poll
 _lock = threading.Lock()
 _worker = ThreadPoolExecutor(max_workers=1)   # ONE: plans rolls are heavy
 
@@ -64,6 +88,16 @@ def _cache(key: str, sheet: dict, status: str, pending: bool) -> None:
             _inflight.discard(key)
         if len(_deep_cache) > 64:                 # bounded: a session's worth
             _deep_cache.pop(next(iter(_deep_cache)))
+
+
+def _prune_interest(now: float) -> None:
+    """Drop sessions that stopped asking. Callers hold `_lock`. Used by BOTH
+    the request path and the worker (Codex): pruning only on write let an
+    abandoned session keep a roll alive through a quiet period, which is the
+    exact thing the TTL exists to prevent."""
+    for sid in [s for s, (_, t) in _latest_by_session.items()
+                if now - t > _INTEREST_TTL]:
+        del _latest_by_session[sid]
 
 
 def _stream_preroll(fen: str, session_id: str) -> None:
@@ -95,8 +129,21 @@ def _deep_job(fen: str, session_id: str = "") -> None:
     """The ROLL phase only (the PRE stream is fired upstream, from the request
     thread — see build). Roll once; cache POST when verify lands; end the
     loading stream. Every failure caches a terminal result so the app's
-    polling terminates."""
+    polling terminates.
+
+    LATEST-WINS: a job for a position NOBODY is looking at any more drops
+    instead of rolling (5s of engine on a position the user scrubbed past).
+    The test is over every session's latest, not just the session that
+    happened to submit it — the roll belongs to the POSITION, so a second
+    window still sitting on this FEN keeps it alive even if the submitter has
+    navigated on. Clearing the inflight mark is what makes dropping safe: the
+    app polls every 1.5-2.5s, so returning to the position re-submits it."""
     key = " ".join(fen.split()[:4])
+    with _lock:
+        _prune_interest(time.monotonic())
+        if not any(k == key for k, _ in _latest_by_session.values()):
+            _inflight.discard(key)
+            return
     try:
         from .plans import service as _plans
         # No pipeline jargon in the status bar (owner: "remove the Rolling,
@@ -159,7 +206,7 @@ def _blank(**over) -> dict:
     return out
 
 
-def build(fen: str, *, seed: str = "", live: bool = False) -> dict:
+def build(fen: str, *, seed: str = "") -> dict:
     """MarginContent for `fen`. Three staged states (the owner's 2026-07-24
     staging, restored from backend fb4b2d7 when /content was wired up):
 
@@ -181,6 +228,16 @@ def build(fen: str, *, seed: str = "", live: bool = False) -> dict:
     board = Board(fen)                    # validates; raises ValueError on garbage
     plies = _plies_played(fen)
     move_no = (plies // 2) + 1
+
+    # WHERE THIS SESSION IS, recorded for EVERY request — not just the ones
+    # that submit a roll (Codex): navigating from an out-of-book position to
+    # an in-book or already-cached one is still navigating away, and a queued
+    # job for the old position must drop. See _deep_job's latest-wins.
+    key = " ".join(fen.split()[:4])
+    now = time.monotonic()
+    with _lock:
+        _latest_by_session[seed] = (key, now)
+        _prune_interest(now)
 
     out: dict = {}
 
@@ -233,12 +290,14 @@ def build(fen: str, *, seed: str = "", live: bool = False) -> dict:
 
     # out of book — the plans layer (unchanged; runs for every position that
     # is NOT in theory, so sheet/raw/plansPending behave as before).
-    key = " ".join(fen.split()[:4])
     cached = _deep_cache.get(key)
     if cached is not None:
         return _blank(statusLine=cached["statusLine"], sheet=cached["sheet"],
                       raw=cached["raw"], plansPending=cached["pending"], **out)
-    if live and _pool is not None:
+    if _pool is not None:
+        # EVERY out-of-book position rolls, variation or scrub included
+        # (2026-07-26). The worker is protected by latest-wins, not by
+        # refusing to look at anything but the live game.
         submitted = False
         with _lock:
             if key not in _inflight:

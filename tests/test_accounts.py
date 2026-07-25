@@ -218,7 +218,7 @@ _PUBLIC = {"/health", "/auth/register", "/auth/login", "/auth/logout"}
 _GATED = [
     ("GET", "/sessions"), ("GET", "/session"), ("POST", "/session/new"), ("POST", "/session"),
     ("POST", "/move"), ("POST", "/drill"), ("POST", "/lesson"), ("POST", "/analyze"),
-    ("GET", "/config"),
+    ("GET", "/config"), ("POST", "/margin"),
 ]
 
 
@@ -308,7 +308,11 @@ def test_asking_for_another_users_chat_is_403_not_500(tmp_path, monkeypatch):
                   client.post("/move", json={"uci": "e2e4", "session_id": theirs}, headers=h1),
                   client.post("/drill", json={"fen": "8/8/8/4k3/8/4K3/8/7R w - - 0 1",
                                               "session_id": theirs}, headers=h1),
-                  client.post("/lesson", json={"op": "leave", "session_id": theirs}, headers=h1)):
+                  client.post("/lesson", json={"op": "leave", "session_id": theirs}, headers=h1),
+                  # /margin names a chat too — it seeds the epigraph, addresses
+                  # the pre-roll stream and keys latest-wins (2026-07-26)
+                  client.post("/margin", json={"fen": "8/8/8/4k3/8/4K3/8/7R w - - 0 1",
+                                               "session_id": theirs}, headers=h1)):
             assert r.status_code == 403, f"expected 403, got {r.status_code}: {r.text[:120]}"
 
         assert store.db.session_owner(theirs) == (True, u2)             # still B's
