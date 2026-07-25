@@ -309,17 +309,35 @@ def test_roll_submit_failure_clears_inflight_for_retry(monkeypatch):
         margin.configure(pool=None, maia=None)
 
 
-def test_no_preroll_stream_in_the_opening():
-    # owner 2026-07-25: "don't stream when in opening phase" — early
-    # out-of-book positions get no feature cycle (the roll still runs).
+IN_BOOK = "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2"  # 1.e4 e5
+
+
+def test_stream_ignores_game_phase_streams_whenever_called():
+    # owner 2026-07-25: "it should stream when not in book, not on the phase
+    # of the game." _stream_preroll no longer gates on game_phase — an early
+    # opening-phase position streams the same as a middlegame one.
     events = []
     margin.configure(pool=None, maia=None,
                      publish=lambda p, *, session_id: events.append(p))
     try:
         opening = "rnbqkb1r/pppp1ppp/5n2/4p3/2P5/6P1/PP1PPP1P/RNBQKBNR w KQkq - 0 3"
-        margin._stream_preroll(opening, "s1")
-        assert events == []                              # opening -> silent
-        margin._stream_preroll(OUT_OF_BOOK, "s1")        # developed middlegame
-        assert events and events[0]["stage"] == "pawns"  # ...streams
+        margin._stream_preroll(opening, "s1")            # opening phase
+        assert events and events[0]["stage"] == "pawns"  # ...still streams
     finally:
+        margin.configure(pool=None, maia=None)
+
+
+def test_in_book_position_does_not_stream():
+    # the IN-BOOK gate lives in build(): a named opening returns the theory
+    # card BEFORE reaching the deep-job submit, so no pre-roll fires.
+    calls = []
+    margin.configure(pool=object(), maia=None, publish=lambda p, *, session_id: None)
+    monkeypatch_free = margin._stream_preroll
+    margin._stream_preroll = lambda fen, sid: calls.append(fen)  # type: ignore
+    try:
+        m = build(IN_BOOK, seed="s1", live=True)
+        assert m["theory"] is not None and calls == []   # theory card, no stream
+    finally:
+        margin._stream_preroll = monkeypatch_free
+        margin._deep_cache.clear(); margin._inflight.clear()
         margin.configure(pool=None, maia=None)

@@ -72,18 +72,13 @@ def _stream_preroll(fen: str, session_id: str) -> None:
     the app cycles the highlights while the rolls grind. Failures are
     swallowed: the loading stream must never take the sheet down.
 
-    NOT in the opening (owner 2026-07-25: "don't stream when in opening
-    phase") — early positions have no formed structure and the feature
-    cycle is noise; the roll still runs, the app just shows the plain
-    reading line until the sheet lands."""
+    Streams for whatever it is handed — the IN-BOOK / OUT-OF-BOOK gate lives
+    upstream in build() (an in-book position returns the theory card before
+    ever submitting a deep job), so by the time this runs the position is
+    out of book (owner 2026-07-25: "it should stream when not in book, not
+    on the phase of the game")."""
     if _publish is None or not session_id:
         return
-    try:
-        from lucena_core.reads import game_phase
-        if game_phase(fen)["phase"] == "opening":
-            return
-    except Exception:
-        pass          # phase read failed -> fall through and stream anyway
     try:
         from .plans.service import _bootstrap
         _bootstrap()
