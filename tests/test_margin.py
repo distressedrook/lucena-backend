@@ -191,3 +191,62 @@ def test_unattributable_wikibooks_is_not_theory_and_still_rolls(monkeypatch):
     m = build(OUT_OF_BOOK, live=True)
     assert m["theory"] is None                     # not gated behind an empty card
     assert m["plansPending"] is True and len(submitted) == 1   # rolls as normal
+
+
+# -- the loading stream's terminal contract (Codex P2, 2026-07-25) ------------
+
+def _capture_publish(events):
+    return lambda payload, *, session_id: events.append((session_id, payload))
+
+
+def test_deep_job_publishes_done_on_success(monkeypatch):
+    import lucena_backend.plans.service as svc
+    events = []
+    margin.configure(pool=None, maia=None, publish=_capture_publish(events))
+    monkeypatch.setattr(svc, "sheet_json_staged",
+                        lambda fen, pool, maia, on_pre: (None, {"ok": True}))
+    key = " ".join(OUT_OF_BOOK.split()[:4])
+    try:
+        margin._deep_job(OUT_OF_BOOK, "sess-1")
+        assert events[-1][1]["stage"] == "done" and events[-1][0] == "sess-1"
+        assert margin._deep_cache[key]["pending"] is False
+        assert margin._deep_cache[key]["sheet"] == {"ok": True}
+    finally:
+        margin._deep_cache.clear()
+        margin.configure(pool=None, maia=None)
+
+
+def test_deep_job_publishes_done_on_failure_too(monkeypatch):
+    # the app's loading cycle must END against a terminal error, not spin
+    import lucena_backend.plans.service as svc
+    events = []
+    margin.configure(pool=None, maia=None, publish=_capture_publish(events))
+    def boom(fen, pool, maia, on_pre):
+        raise RuntimeError("roll failed")
+    monkeypatch.setattr(svc, "sheet_json_staged", boom)
+    key = " ".join(OUT_OF_BOOK.split()[:4])
+    try:
+        margin._deep_job(OUT_OF_BOOK, "sess-1")
+        assert events[-1][1]["stage"] == "done"
+        assert margin._deep_cache[key]["pending"] is False
+        assert "error" in margin._deep_cache[key]["sheet"]
+    finally:
+        margin._deep_cache.clear()
+        margin.configure(pool=None, maia=None)
+
+
+def test_raising_publisher_never_corrupts_a_successful_sheet(monkeypatch):
+    import lucena_backend.plans.service as svc
+    def bad_publish(payload, *, session_id):
+        raise RuntimeError("socket gone")
+    margin.configure(pool=None, maia=None, publish=bad_publish)
+    monkeypatch.setattr(svc, "sheet_json_staged",
+                        lambda fen, pool, maia, on_pre: (None, {"ok": True}))
+    key = " ".join(OUT_OF_BOOK.split()[:4])
+    try:
+        margin._deep_job(OUT_OF_BOOK, "sess-1")
+        assert margin._deep_cache[key]["pending"] is False
+        assert margin._deep_cache[key]["sheet"] == {"ok": True}   # not ERROR
+    finally:
+        margin._deep_cache.clear()
+        margin.configure(pool=None, maia=None)

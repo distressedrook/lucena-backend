@@ -41,17 +41,19 @@ IDEA_SENTENCES = 2    # authored annotations are essays; the card takes the lead
 # -- plumbing (configured once by httpserver) ---------------------------------
 _pool = None          # EnginePool — leased per job
 _maia = None          # MaiaEngine | None (plans verify degrades without it)
+_publish = None       # state.publish_margin_progress | None (loading stream)
 _deep_cache: dict[str, dict] = {}      # norm fen -> {"raw", "statusLine", "pending"}
 _inflight: set[str] = set()
 _lock = threading.Lock()
 _worker = ThreadPoolExecutor(max_workers=1)   # ONE: plans rolls are heavy
 
 
-def configure(pool, maia) -> None:
+def configure(pool, maia, publish=None) -> None:
     """Called once at server build; without it the deep layer stays off and
-    the margin serves nothing (tests, offline)."""
-    global _pool, _maia
-    _pool, _maia = pool, maia
+    the margin serves nothing (tests, offline). `publish` streams pre-roll
+    stages to the session's sockets (interactive loading); None = silent."""
+    global _pool, _maia, _publish
+    _pool, _maia, _publish = pool, maia, publish
 
 
 def _cache(key: str, sheet: dict, status: str, pending: bool) -> None:
@@ -64,10 +66,30 @@ def _cache(key: str, sheet: dict, status: str, pending: bool) -> None:
             _deep_cache.pop(next(iter(_deep_cache)))
 
 
-def _deep_job(fen: str) -> None:
+def _stream_preroll(fen: str, session_id: str) -> None:
+    """The PRE phase, streamed (owner 2026-07-25): every feature the fast
+    geometry detects goes out as a margin_progress event with its squares —
+    the app cycles the highlights while the rolls grind. Failures are
+    swallowed: the loading stream must never take the sheet down."""
+    if _publish is None or not session_id:
+        return
+    try:
+        from .plans.service import _bootstrap
+        _bootstrap()
+        from preroll import features as _preroll_features
+        stages = _preroll_features(fen)
+        n = len(stages)
+        for i, st in enumerate(stages):
+            _publish({"fen": fen, "i": i, "n": n, **st}, session_id=session_id)
+    except Exception:
+        _log.warning("preroll stream failed for %s", fen, exc_info=True)
+
+
+def _deep_job(fen: str, session_id: str = "") -> None:
     """Roll once; publish PRE the moment it exists, POST when verify lands.
     Every failure caches a terminal result so the app's polling terminates."""
     key = " ".join(fen.split()[:4])
+    _stream_preroll(fen, session_id)
     try:
         from .plans import service as _plans
         # No pipeline jargon in the status bar (owner: "remove the Rolling,
@@ -77,9 +99,24 @@ def _deep_job(fen: str) -> None:
             fen, _pool, _maia,
             on_pre=lambda pre: _cache(key, pre, None, True))
         _cache(key, post, None, False)
+        _publish_done(fen, session_id)
     except Exception:
         _log.warning("margin deep layer failed for %s", fen, exc_info=True)
         _cache(key, {"error": "sheet failed — see backend log"}, "ERROR", False)
+        # the loading stream must END on failure too, or the app cycles
+        # pre-roll highlights forever against a terminal error (Codex P1)
+        _publish_done(fen, session_id)
+
+
+def _publish_done(fen: str, session_id: str) -> None:
+    """End the loading stream — guarded so a publisher hiccup can never
+    convert a successful sheet into an error."""
+    if _publish is None or not session_id:
+        return
+    try:
+        _publish({"fen": fen, "stage": "done"}, session_id=session_id)
+    except Exception:
+        _log.warning("margin done-publish failed for %s", fen, exc_info=True)
 
 
 # -- the INSTANT layer's card helpers (restored verbatim from backend
@@ -198,7 +235,7 @@ def build(fen: str, *, seed: str = "", live: bool = False) -> dict:
         with _lock:
             if key not in _inflight:
                 _inflight.add(key)
-                _worker.submit(_deep_job, fen)
+                _worker.submit(_deep_job, fen, seed)
         return _blank(plansPending=True, **out)      # no "ROLLING…" jargon
     return _blank(statusLine=out.get("masthead") and f"OPENING · MOVE {move_no}"
                   or f"MOVE {move_no}", **out)

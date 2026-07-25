@@ -1329,6 +1329,16 @@ class StateStore:
         """
         self._publish_to(session_id, "engine_lines", payload)
 
+    # -- margin pre-roll progress (writer: margin deep worker; transient) ------
+    def publish_margin_progress(self, payload: dict, *, session_id: str) -> None:
+        """Push one pre-roll analysis stage (label + squares to highlight) for
+        the interactive loading (owner 2026-07-25: "as we analyze pawn
+        structure, all the pawns must get highlighted..."). Transient — the
+        margin's finished sheet supersedes it; never stored or replayed.
+        `session_id` explicit for the same reason as publish_engine_lines:
+        the margin deep worker is a raw thread, contextvars don't cross."""
+        self._publish_to(session_id, "margin_progress", payload)
+
     # -- live agent status (writer: tool wrappers; transient, not persisted) ---
     def publish_status(self, text: str | None) -> None:
         """Push a one-line "what the coach is doing" phase (grounded in the tool it just called),
