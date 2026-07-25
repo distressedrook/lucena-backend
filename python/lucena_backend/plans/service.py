@@ -25,7 +25,14 @@ from lucena_core.board import Board
 
 from .rolls import roll_engine, roll_maia
 
-PLANS_CP_BAND = 150     # |eval| <= this (cp, either POV) counts as equalish
+# |eval| <= this (cp, either POV) counts as equalish — the band in which a
+# position is a game to be played rather than a result to be converted, so the
+# chat answers a paste with the PLANS read instead of a plain grounded one.
+# Raised 150 -> 250 with the sheet's own _DECISIVE_CP (owner 2026-07-26: "make
+# the positional information show up when eval < |2.5|"); the two are the same
+# ruling about the same band and drifting apart would mean the margin shows
+# plans the chat refuses to discuss.
+PLANS_CP_BAND = 250
 
 
 class PlansRollError(RuntimeError):

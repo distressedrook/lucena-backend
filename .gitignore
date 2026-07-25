@@ -2,3 +2,9 @@
 **/__pycache__/
 *.egg-info/
 build/
+
+# Claude Code's scratch space, INCLUDING its git worktrees (.claude/worktrees/<name>
+# is a live checkout with its own .git). Never committable: an embedded repository
+# would go in as a gitlink nobody can clone, and a broad `git add -A` here would try
+# (Codex 2026-07-26).
+.claude/

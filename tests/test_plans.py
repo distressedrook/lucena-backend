@@ -13,6 +13,7 @@ import pytest
 
 from lucena_backend.coaching.freeform import FreeformHandler
 from lucena_backend.engine_io.enginepool import EnginePool
+from lucena_backend import plans as _plans
 from lucena_backend.plans import is_endgame, sheet_for
 from lucena_backend.plans.rolls import roll_engine, roll_maia
 
@@ -130,6 +131,15 @@ def test_plans_read_gates(pool, monkeypatch):
         # outside the equalish band: refused after the probe
         g = _Ground(320)
         assert await _handler(g)._plans_read(MID) is None and g.calls == 1
+        # ...and the band is 250cp — the sheet's own _DECISIVE_CP (owner
+        # 2026-07-26: positional information shows while |eval| < 2.5). Pinned
+        # on BOTH sides of the boundary so a drift back to 150 fails here: the
+        # margin would be showing plans the chat refuses to discuss.
+        assert _plans.PLANS_CP_BAND == 250
+        g = _Ground(_plans.PLANS_CP_BAND + 1)
+        assert await _handler(g)._plans_read(MID) is None and g.calls == 1
+        at_band = await _handler(_Ground(_plans.PLANS_CP_BAND, pool))._plans_read(MID)
+        assert isinstance(at_band, str) and at_band.strip()   # exactly at it still reads
         # inside the band: rolled, sheeted, RENDERED deterministically
         out = await _handler(_Ground(40, pool))._plans_read(MID)
         assert isinstance(out, str) and out.strip()
