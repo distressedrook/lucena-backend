@@ -8,6 +8,21 @@ import pytest
 from lucena_backend import margin
 from lucena_backend.margin import build
 
+@pytest.fixture(autouse=True)
+def _isolated_margin(monkeypatch):
+    """`margin` keeps its plumbing in MODULE GLOBALS that `build_app` writes (pool, publish, the
+    position cache). Any test that builds an app therefore configures this module for every test
+    that follows, which made these order-dependent: a leaked position cache answered a position one
+    of these tests expected to see ROLLED. Each test starts from an unconfigured module."""
+    monkeypatch.setattr(margin, "_pool", None)
+    monkeypatch.setattr(margin, "_maia", None)
+    monkeypatch.setattr(margin, "_publish", None)
+    monkeypatch.setattr(margin, "_positions", None)
+    monkeypatch.setattr(margin, "_deep_cache", {})
+    monkeypatch.setattr(margin, "_inflight", set())
+    monkeypatch.setattr(margin, "_latest_by_session", {})
+
+
 START = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 OUT_OF_BOOK = "r2q1rk1/pp1bbppp/2n1pn2/2pp4/3P1B2/2NBPN2/PPP2PPP/R2Q1RK1 w - - 4 9"
 

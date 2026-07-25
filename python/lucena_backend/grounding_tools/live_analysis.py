@@ -20,9 +20,14 @@ from .response import pv_san
 class LiveAnalyzer:
     """Deepens one position at a time on a dedicated engine, streaming `engine_lines`."""
 
-    def __init__(self, engine, store, *, max_depth: int = 28, multipv: int = 3, pv_plies: int = 12):
+    def __init__(self, engine, store, *, max_depth: int = 28, multipv: int = 3, pv_plies: int = 12,
+                 positions=None):
         self._engine = engine
         self._store = store
+        # positions.PositionCache | None — the fen -> lines cache. Walking BACK through a game used
+        # to re-deepen every position from scratch (2026-07-26); now the last line-up published for
+        # a position is republished immediately and the search resumes past it.
+        self._positions = positions
         self._max_depth = max_depth
         self._multipv = multipv
         self._pv_plies = pv_plies
@@ -72,7 +77,16 @@ class LiveAnalyzer:
             self._deepen(fen, gen, sid)
 
     def _deepen(self, fen: str, gen: int, sid: str | None) -> None:
-        for depth in range(1, self._max_depth + 1):
+        # WHAT WE ALREADY KNOW about this position goes out first, and the search picks up past it.
+        # Arrowing back through a game re-analysed every position from depth 1 (owner 2026-07-26:
+        # "the entire position is being recalculated ... even when I go back") — a position already
+        # taken to depth 28 now answers instantly and searches not at all.
+        start = 1
+        cached = self._cached(fen)
+        if cached is not None:
+            self._republish(cached, sid)
+            start = int(cached.get("depth") or 0) + 1
+        for depth in range(start, self._max_depth + 1):
             with self._cond:
                 if self._stopped or gen != self._gen:
                     return
@@ -97,6 +111,42 @@ class LiveAnalyzer:
             while not self._stopped and gen == self._gen:
                 self._cond.wait()
 
+    def _cached(self, fen: str) -> dict | None:
+        """The deepest line-up we have for this position, if any. A cache miss is always fine."""
+        if self._positions is None:
+            return None
+        try:
+            from ..positions import LINES
+            payload = self._positions.get(fen, LINES)
+        except Exception:                            # noqa: BLE001 — never break a search on a cache
+            return None
+        # The payload carries the fen it was computed for; a normalized-key collision (same
+        # placement, different clocks) is still the same position to an engine, but the PV is
+        # rendered from a fen, so republish the one that was stored.
+        return payload if isinstance(payload, dict) and payload.get("lines") else None
+
+    def _republish(self, payload: dict, sid: str | None) -> None:
+        if not sid:
+            return
+        try:
+            self._store.publish_engine_lines(payload, session_id=sid)
+        except Exception:                            # noqa: BLE001
+            pass
+
+    def _store_lines(self, payload: dict) -> None:
+        """Keep the line-up for next time. Written at a few depths rather than all 28: every depth
+        would be ~28 database writes per position for a readout that only improves."""
+        if self._positions is None:
+            return
+        depth = int(payload.get("depth") or 0)
+        if depth < 8 or (depth % 4 and depth != self._max_depth):
+            return
+        try:
+            from ..positions import LINES
+            self._positions.put(payload["fen"], LINES, payload)
+        except Exception:                            # noqa: BLE001
+            pass
+
     def _publish(self, fen: str, depth: int, analysis, sid: str | None) -> None:
         if not sid:                                  # no chat → nobody to address; never publish blind
             return
@@ -111,7 +161,9 @@ class LiveAnalyzer:
                 "win_pct": round(wp if white else 100 - wp, 1),
                 "pv_san": pv_san(fen, ln.pv, max_plies=self._pv_plies),
             })
-        self._store.publish_engine_lines({
+        payload = {
             "fen": fen, "depth": depth, "engine": self._engine.name,
             "opening": openings.name_for(fen), "lines": lines,
-        }, session_id=sid)
+        }
+        self._store.publish_engine_lines(payload, session_id=sid)
+        self._store_lines(payload)

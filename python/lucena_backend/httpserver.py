@@ -159,6 +159,13 @@ def build_app(*, home: str, llm=None, model: str = _DEFAULT_MODEL,
     # per process is deliberate: each instance is a ~485MB torch model.)
     ground_ctx = ToolContext(store=store, pool=pool, maia=None, player_rating=rating)
 
+    # WHAT WE KNOW ABOUT A POSITION, keyed by the position (2026-07-26). Analysis is a pure function
+    # of the fen, so both expensive producers — the plans roll and the live engine — read and write
+    # through here instead of recomputing a position the player has already visited. Shared by
+    # everything; nothing in it belongs to a chat.
+    from .positions import PositionCache
+    positions = PositionCache(db)
+
     # THE LIVE ANALYZER (wired 2026-07-26; the class existed but nothing ever
     # constructed it, so /analyze was a stub and the Analysis panel never had
     # an engine behind it). Started on FIRST USE, not at build: a server that
@@ -171,7 +178,7 @@ def build_app(*, home: str, llm=None, model: str = _DEFAULT_MODEL,
                 try:
                     from .grounding_tools.live_analysis import LiveAnalyzer
                     a = LiveAnalyzer(Engine(threads=_LIVE_THREADS), store,
-                                     multipv=_LIVE_MULTIPV)
+                                     multipv=_LIVE_MULTIPV, positions=positions)
                     a.start()
                     _live["analyzer"] = a
                 except Exception:
@@ -191,7 +198,8 @@ def build_app(*, home: str, llm=None, model: str = _DEFAULT_MODEL,
     _spine_llm = llm or _make_adapter({"provider": "gemini", "default_model": model})
     from . import margin as _margin_mod
     _margin_mod.configure(pool=pool, maia=maia,
-                          publish=store.publish_margin_progress)   # engines + the loading stream
+                          publish=store.publish_margin_progress,   # engines + the loading stream
+                          positions=positions)                     # ...and the durable sheet cache
     loop = ConversationLoop(
         store=store,
         freeform=FreeformHandler(ctx=ctx, store=store, llm=_spine_llm, model=model, ground=ground_ctx),

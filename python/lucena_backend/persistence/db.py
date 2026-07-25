@@ -115,6 +115,18 @@ CREATE TABLE IF NOT EXISTS beat (
     session_id text, activity_idx int NOT NULL DEFAULT 0, i int, payload jsonb NOT NULL,
     ts double precision NOT NULL,
     PRIMARY KEY (session_id, activity_idx, i));
+
+-- WHAT WE KNOW ABOUT A POSITION, keyed by the position itself (2026-07-26, owner: "the entire
+-- position is being recalculated ... even when I go back. There needs to be a fen: positionJSON
+-- cache"). Analysis is a pure function of the FEN, so it is cached ACROSS chats, activities and
+-- restarts — nothing here belongs to a session. `kind` separates the artifacts a position can
+-- have (the plans sheet, the engine's line-up); `fen` is normalized (placement + side + castling +
+-- ep), so clocks never fragment it. Adding a TABLE is safe on an existing schema — the DDL caveat
+-- above is about columns on tables that already exist.
+CREATE TABLE IF NOT EXISTS position_cache (
+    fen text, kind text, payload jsonb NOT NULL, updated_at double precision NOT NULL,
+    PRIMARY KEY (fen, kind));
+CREATE INDEX IF NOT EXISTS position_cache_age ON position_cache (updated_at);
 """
 
 _DSN = os.environ.get("LUCENA_PG_DSN", "postgresql:///lucena_dev")
@@ -177,6 +189,56 @@ class DB:
             self._ex("INSERT INTO meta(key,value) VALUES(%s,%s) "
                      "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
             self._conn.commit()
+
+    # -- the position cache (see the DDL note: keyed by position, not session) --
+    # These three ROLL BACK before re-raising, unlike the rest of this class, because their caller
+    # (positions.PositionCache) SWALLOWS the error to degrade to a cache miss. A failed statement
+    # leaves psycopg's transaction aborted, so without the rollback the next unrelated query on this
+    # shared connection would die with InFailedSqlTransaction — a broken cache would take the whole
+    # backend down with it, which is exactly what "a miss is survivable" must not mean.
+    def get_position(self, fen: str, kind: str) -> dict | None:
+        with self._lock:
+            try:
+                row = self._ex("SELECT payload FROM position_cache WHERE fen=%s AND kind=%s",
+                               (fen, kind)).fetchone()
+            except Exception:
+                self._rollback()
+                raise
+            return row[0] if row else None
+
+    def put_position(self, fen: str, kind: str, payload: dict, now: float) -> None:
+        with self._lock:
+            try:
+                self._ex("INSERT INTO position_cache(fen,kind,payload,updated_at) "
+                         "VALUES(%s,%s,%s,%s) ON CONFLICT(fen,kind) DO UPDATE SET "
+                         "payload=excluded.payload, updated_at=excluded.updated_at",
+                         (fen, kind, Jsonb(payload), now))
+                self._conn.commit()
+            except Exception:
+                self._rollback()
+                raise
+
+    def prune_positions(self, keep: int) -> int:
+        """Drop all but the `keep` most recently written entries. The cache is a convenience, so it
+        is bounded by RECENCY rather than kept forever — returns how many rows went."""
+        with self._lock:
+            try:
+                cur = self._ex(
+                    "DELETE FROM position_cache WHERE ctid IN ("
+                    "  SELECT ctid FROM position_cache ORDER BY updated_at DESC OFFSET %s)", (keep,))
+                self._conn.commit()
+            except Exception:
+                self._rollback()
+                raise
+            return cur.rowcount or 0
+
+    def _rollback(self) -> None:
+        """Clear an aborted transaction so the connection stays usable. Never raises: it runs on an
+        error path, and a rollback that fails must not mask the failure that got us here."""
+        try:
+            self._conn.rollback()
+        except Exception:  # noqa: BLE001
+            pass
 
     # -- accounts (login sessions live here; chat sessions are below) ------
     def create_user(self, user_id: str, email: str, password_hash: str, now: float) -> None:

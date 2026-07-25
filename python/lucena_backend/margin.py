@@ -49,6 +49,8 @@ from lucena_core import openings
 from lucena_core import theory
 from lucena_core.board import Board
 
+from .positions import SHEET as _POS_SHEET
+
 _log = logging.getLogger(__name__)
 
 IDEA_SENTENCES = 2    # authored annotations are essays; the card takes the lead
@@ -57,6 +59,10 @@ IDEA_SENTENCES = 2    # authored annotations are essays; the card takes the lead
 _pool = None          # EnginePool — leased per job
 _maia = None          # MaiaEngine | None (plans verify degrades without it)
 _publish = None       # state.publish_margin_progress | None (loading stream)
+_positions = None     # positions.PositionCache | None — the durable fen -> sheet cache
+# The IN-FLIGHT view of a position: what to answer polls with while a roll is running, plus the
+# finished sheet for as long as this process lives. The DURABLE copy is `_positions` — this dict is
+# the fast path in front of it and the only place a `pending` (mid-roll) state exists.
 _deep_cache: dict[str, dict] = {}      # norm fen -> {"raw", "statusLine", "pending"}
 _inflight: set[str] = set()
 # session id -> (key of the position that session most recently asked for,
@@ -72,12 +78,13 @@ _lock = threading.Lock()
 _worker = ThreadPoolExecutor(max_workers=1)   # ONE: plans rolls are heavy
 
 
-def configure(pool, maia, publish=None) -> None:
+def configure(pool, maia, publish=None, positions=None) -> None:
     """Called once at server build; without it the deep layer stays off and
     the margin serves nothing (tests, offline). `publish` streams pre-roll
-    stages to the session's sockets (interactive loading); None = silent."""
-    global _pool, _maia, _publish
-    _pool, _maia, _publish = pool, maia, publish
+    stages to the session's sockets (interactive loading); None = silent.
+    `positions` is the durable fen -> sheet cache; None = memory only."""
+    global _pool, _maia, _publish, _positions
+    _pool, _maia, _publish, _positions = pool, maia, publish, positions
 
 
 def _cache(key: str, sheet: dict, status: str, pending: bool) -> None:
@@ -88,6 +95,13 @@ def _cache(key: str, sheet: dict, status: str, pending: bool) -> None:
             _inflight.discard(key)
         if len(_deep_cache) > 64:                 # bounded: a session's worth
             _deep_cache.pop(next(iter(_deep_cache)))
+    # A FINISHED sheet is worth keeping past this process: it costs a ~5s
+    # engine+Maia roll, and the same position comes back every time the player
+    # walks the line again (2026-07-26). Pre-verify snapshots are not stored —
+    # they are a loading state, not an answer. An ERROR is not stored either;
+    # the next visit should retry, not inherit yesterday's failure.
+    if not pending and _positions is not None and "error" not in sheet:
+        _positions.put(key, _POS_SHEET, sheet)
 
 
 def _prune_interest(now: float) -> None:
@@ -294,6 +308,16 @@ def build(fen: str, *, seed: str = "") -> dict:
     if cached is not None:
         return _blank(statusLine=cached["statusLine"], sheet=cached["sheet"],
                       raw=cached["raw"], plansPending=cached["pending"], **out)
+    # ...then the DURABLE cache: a position analysed in an earlier session — or
+    # before the last restart — is answered instantly instead of re-rolled
+    # (owner 2026-07-26: "the entire position is being recalculated ... even
+    # when I go back"). Warmed into `_deep_cache` so the walk back down a line
+    # costs one lookup, not one per ply.
+    stored = _positions.get(key, _POS_SHEET) if _positions is not None else None
+    if stored is not None:
+        _cache(key, stored, None, False)
+        return _blank(sheet=stored, raw=json.dumps(stored, indent=2),
+                      plansPending=False, **out)
     if _pool is not None:
         # EVERY out-of-book position rolls, variation or scrub included
         # (2026-07-26). The worker is protected by latest-wins, not by

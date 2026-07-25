@@ -117,3 +117,94 @@ def test_switching_off_never_starts_an_engine(client):
     client.post("/analyze", json={"on": True, "fen": VARIATION})
     client.post("/analyze", json={"on": False, "fen": VARIATION})
     assert _FakeAnalyzer.made[0].targets[-1][:2] == (None, False)
+
+
+# -- the fen -> lines cache (2026-07-26) --------------------------------------
+
+class _RecordingStore:
+    def __init__(self):
+        self.published = []
+
+    def publish_engine_lines(self, payload, *, session_id):
+        self.published.append(payload)
+
+
+class _FakeEngine:
+    name = "Stockfish test"
+
+    def __init__(self):
+        self.searched = []
+
+    def analyse(self, fen, *, depth, multipv):
+        self.searched.append(depth)
+
+        class _Score:
+            @staticmethod
+            def to_ceiled_cp():
+                return 12
+
+        class _Line:
+            rank, pv, score = 1, [], _Score()
+
+        class _Analysis:
+            lines = [_Line()]
+
+        return _Analysis()
+
+    def close(self):
+        pass
+
+
+def _analyzer(store, engine, cache, max_depth=12):
+    from lucena_backend.grounding_tools.live_analysis import LiveAnalyzer
+    return LiveAnalyzer(engine, store, max_depth=max_depth, multipv=4, positions=cache)
+
+
+def _deepen_once(a, fen, sid="s1"):
+    """Run one deepen pass to completion. `_deepen` parks on its condition once it reaches max
+    depth (that is how it holds a finished position), so the test releases it with stop()."""
+    import threading
+    t = threading.Thread(target=a._deepen, args=(fen, 0, sid), daemon=True)
+    t.start()
+    t.join(timeout=2)          # the fake engine is instant; this is the parked wait
+    a.stop()
+    t.join(timeout=2)
+    assert not t.is_alive(), "the deepen loop never parked"
+
+
+def test_a_known_position_is_republished_and_not_re_searched():
+    """Walking BACK through a game re-deepened every position from depth 1. A position already
+    taken to the maximum depth now answers instantly and searches not at all."""
+    from lucena_backend.positions import LINES, PositionCache
+    store, engine = _RecordingStore(), _FakeEngine()
+    cache = PositionCache(None)
+    cached = {"fen": VARIATION, "depth": 12, "engine": "Stockfish 18",
+              "opening": None, "lines": [{"rank": 1, "eval_white_cp": 25,
+                                          "win_pct": 52.0, "pv_san": ["d3"]}]}
+    cache.put(VARIATION, LINES, cached)
+    _deepen_once(_analyzer(store, engine, cache), VARIATION)
+    assert store.published == [cached]           # answered from the cache...
+    assert engine.searched == []                 # ...and the engine never ran
+
+
+def test_a_partly_known_position_resumes_past_it():
+    from lucena_backend.positions import LINES, PositionCache
+    store, engine = _RecordingStore(), _FakeEngine()
+    cache = PositionCache(None)
+    cache.put(VARIATION, LINES, {"fen": VARIATION, "depth": 9, "engine": "x",
+                                 "lines": [{"rank": 1, "eval_white_cp": 1,
+                                            "win_pct": 50.0, "pv_san": []}]})
+    _deepen_once(_analyzer(store, engine, cache), VARIATION)
+    assert engine.searched == [10, 11, 12]       # picks up where it left off
+    assert store.published[0]["depth"] == 9      # the known line-up went out first
+
+
+def test_the_line_up_is_stored_at_a_few_depths_not_all_of_them(monkeypatch):
+    """Every depth would be ~28 writes per position for a readout that only improves."""
+    from lucena_backend.positions import PositionCache
+    store, engine = _RecordingStore(), _FakeEngine()
+    cache = PositionCache(None)
+    stored = []
+    monkeypatch.setattr(cache, "put", lambda fen, kind, payload: stored.append(payload["depth"]))
+    _deepen_once(_analyzer(store, engine, cache), VARIATION)
+    assert stored == [8, 12]                     # the settling depth, then every fourth / the last
