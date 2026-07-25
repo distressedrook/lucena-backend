@@ -30,6 +30,25 @@ The output is a profile-likelihood interval, not just a number: one game is
 ~40 decisions and the surface is genuinely flat. Read a ±200 band as the
 signal, and the point estimate as its centre.
 
+**What it is worth** (measured 2026-07-26, both rigs reproducible):
+
+* Recovery on 10 self-play games at a known SelfElo (`rating_calibrate`):
+  bias +109, MAE 226, the 95% interval covering 18/20 sides. Estimates shrink
+  toward the middle at the ends of the range — expected of an MLE on a flat
+  likelihood, not a bug to correct away.
+* Real humans, 10 sides of lichess blitz labelled 2410–2853: MAE ~250,
+  bias ~-130 — but three of those sides pinned at the top of the grid, because
+  2500+ is past where Maia's policy still separates ratings. Above ~2300 read
+  the answer as "at least this strong", never as a number.
+* The estimator is not fooled by a label: an eleventh side, a 2524 playing a
+  hippo (h6, Rh7, g6, Rg7, f6, e6, d6, c6, a6 …), was read at 800. That is the
+  right answer to the question actually asked — *this game* was not 2500 play.
+
+Two scale caveats before anyone compares to a profile: Maia3 learned lichess
+ratings, so the answer is on the **lichess** scale, not chess.com or FIDE; and
+it estimates the strength shown in ONE game, which is a noisy draw from
+whatever the player's true rating is.
+
 CLI:
 
     cd backend && PYTHONPATH=python .venv/bin/python -m lucena_backend.rating game.pgn
@@ -62,6 +81,7 @@ GRID = list(range(600, 2901, 100))
 MULTIPV = 20        # maia3's own cap (uci.py: "MultiPV … min 1 max 20")
 ROUNDS = 3          # coordinate-ascent passes; converges in 2 on a single game
 PRIOR = 1500        # the opponent rating each side is first fitted against
+TRIM = 0.10         # share of worst-fitting moves dropped per rating (see _fit)
 # 1.92 = χ²(1, 0.95)/2 — the standard profile-likelihood cutoff for a 95% interval.
 LR_CUTOFF = 1.92
 
@@ -210,9 +230,23 @@ def _interval(profile: dict[int, float], peak: float) -> tuple[int, int]:
 
 
 def _fit(pol: _Policy, moves: list[Decision], oppo: int,
-         grid: list[int]) -> dict[int, float]:
-    """LL over the whole grid for one player, against a fixed opponent rating."""
-    return {r: sum(pol.logp(d, r, oppo)[0] for d in moves) for r in grid}
+         grid: list[int], trim: float = TRIM) -> dict[int, float]:
+    """LL over the whole grid for one player, against a fixed opponent rating.
+
+    `trim` drops the worst-fitting share of moves at *each* rating — the trimmed
+    likelihood estimator. Without it a handful of moves carries the whole fit: a
+    time-scramble blunder has a policy near 1e-4 at every plausible rating, so it
+    contributes ~-9 where a normal move contributes ~-1, and six such moves can
+    drag a 2500 player to the bottom of the grid (measured, on lichess 3+0
+    games). Trimming asks the calmer question — "which rating explains the
+    moves this player was actually trying to play?" — and only the outliers pay.
+    """
+    out: dict[int, float] = {}
+    keep = max(1, len(moves) - int(len(moves) * trim))
+    for r in grid:
+        lps = sorted(pol.logp(d, r, oppo)[0] for d in moves)
+        out[r] = sum(lps[len(lps) - keep:]) * (len(moves) / keep)
+    return out
 
 
 def _diagnose(pol: _Policy, moves: list[Decision], rating: int, oppo: int) -> tuple:
@@ -234,7 +268,7 @@ def _diagnose(pol: _Policy, moves: list[Decision], rating: int, oppo: int) -> tu
 
 
 def estimate_ratings(pgn_text: str, maia, *, include_book: bool = False,
-                     rounds: int = ROUNDS,
+                     rounds: int = ROUNDS, trim: float = TRIM,
                      grid: list[int] | None = None) -> dict[bool, Estimate]:
     """Fit both players jointly. Returns {chess.WHITE: Estimate, chess.BLACK: …}.
 
@@ -259,7 +293,7 @@ def estimate_ratings(pgn_text: str, maia, *, include_book: bool = False,
             # The opponent rating is snapped to the grid so the cache actually
             # hits across rounds; the policy barely moves within 100 points.
             oppo = min(grid, key=lambda r: abs(r - cur[not c]))
-            prof = _fit(pol, by_color[c], oppo, grid)
+            prof = _fit(pol, by_color[c], oppo, grid, trim)
             profiles[c] = prof
             peak = _refine(prof)
             if abs(peak - cur[c]) >= 25:
