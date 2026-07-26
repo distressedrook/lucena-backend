@@ -51,6 +51,20 @@ from lucena_core.board import Board
 
 from .positions import SHEET as _POS_SHEET
 
+# The sheet shape the plans layer emits today. A cached sheet from an older one
+# is a miss (see build) — the cache outlives the shape. Read lazily through a
+# helper so importing this module never needs the plans checkout on sys.path.
+
+
+def _sheet_schema() -> str | None:
+    try:
+        from .plans.service import _bootstrap
+        _bootstrap()
+        from fact_sheet import SHEET_SCHEMA
+        return SHEET_SCHEMA
+    except Exception:                       # no plans layer here (tests, offline)
+        return None
+
 _log = logging.getLogger(__name__)
 
 IDEA_SENTENCES = 2    # authored annotations are essays; the card takes the lead
@@ -305,6 +319,18 @@ def build(fen: str, *, seed: str = "") -> dict:
     # out of book — the plans layer (unchanged; runs for every position that
     # is NOT in theory, so sheet/raw/plansPending behave as before).
     cached = _deep_cache.get(key)
+    # Belt and braces (Codex): everything in THIS dict was written by this
+    # process — a roll, or a durable hit that already passed the check below —
+    # so a foreign schema cannot normally get in. Check anyway, so the rule
+    # lives with the read rather than in an argument about provenance. Only
+    # settled entries: a `pending` one is this process's own loading state and
+    # dropping it would break the app's polling.
+    if cached is not None and not cached["pending"]:
+        current = _sheet_schema()
+        if current is not None and (cached["sheet"] or {}).get("schema") != current:
+            with _lock:
+                _deep_cache.pop(key, None)
+            cached = None
     if cached is not None:
         return _blank(statusLine=cached["statusLine"], sheet=cached["sheet"],
                       raw=cached["raw"], plansPending=cached["pending"], **out)
@@ -314,6 +340,16 @@ def build(fen: str, *, seed: str = "") -> dict:
     # when I go back"). Warmed into `_deep_cache` so the walk back down a line
     # costs one lookup, not one per ply.
     stored = _positions.get(key, _POS_SHEET) if _positions is not None else None
+    # A sheet from an OLDER schema is a miss, not an answer (2026-07-26): the
+    # cache outlives the shape, so a sheet rolled before a field moved would
+    # otherwise come back and put a retired part of the UI back on screen. Roll
+    # it again instead; the fresh one overwrites the stale row.
+    current = _sheet_schema()
+    if stored is not None and current is not None \
+            and stored.get("schema") != current:
+        _log.info("dropping a %s sheet for %s (current is %s)",
+                  stored.get("schema"), key, current)
+        stored = None
     if stored is not None:
         _cache(key, stored, None, False)
         return _blank(sheet=stored, raw=json.dumps(stored, indent=2),

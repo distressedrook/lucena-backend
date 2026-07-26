@@ -37,8 +37,11 @@ def test_unconfigured_margin_is_bare_and_never_pends(monkeypatch):
     assert m["raw"] is None and m["plansPending"] is False
 
 
-def test_cached_result_is_served_raw():
+def test_cached_result_is_served_raw(monkeypatch):
     key = " ".join(OUT_OF_BOOK.split()[:4])
+    # The sheet's SCHEMA is checked on the way out (2026-07-26) — a cached sheet
+    # from an older shape is a miss — so this fixture states the current one.
+    monkeypatch.setattr(margin, "_sheet_schema", lambda: "lucena-plans/sheet@1")
     # _cache takes the SHEET DICT now (it does its own pretty-printing)
     margin._cache(key, {"schema": "lucena-plans/sheet@1"}, "POST-VERIFY", False)
     try:

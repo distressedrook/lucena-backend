@@ -104,14 +104,48 @@ def test_a_stored_sheet_is_served_instead_of_rolled(margin_cache, monkeypatch):
     """The whole point: a position analysed before is answered, not re-rolled."""
     submitted = []
     monkeypatch.setattr(margin, "_pool", object())
+    monkeypatch.setattr(margin, "_sheet_schema", lambda: "lucena-plans/sheet@9")
+    monkeypatch.setattr(margin._worker, "submit", lambda *a, **k: submitted.append(a))
+    margin_cache.put(OUT_OF_BOOK, SHEET, {"schema": "lucena-plans/sheet@9"})
+
+    m = build(OUT_OF_BOOK)
+    assert m["plansPending"] is False                  # answered outright
+    assert m["sheet"] == {"schema": "lucena-plans/sheet@9"}
+    assert '"schema"' in m["raw"]
+    assert submitted == []                             # ...and nothing was rolled
+
+
+def test_the_memory_layer_drops_an_older_shape_too(margin_cache, monkeypatch):
+    """Same rule, one layer up: nothing in the process-local cache should ever
+    BE from an older shape, but the check lives with the read so it cannot
+    depend on an argument about provenance (Codex)."""
+    monkeypatch.setattr(margin, "_pool", None)          # unconfigured: no roll
+    monkeypatch.setattr(margin, "_sheet_schema", lambda: "lucena-plans/sheet@9")
+    key = " ".join(OUT_OF_BOOK.split()[:4])
+    margin._deep_cache[key] = {"sheet": {"schema": "lucena-plans/sheet@1"},
+                               "raw": "{}", "statusLine": None, "pending": False}
+    m = build(OUT_OF_BOOK)
+    assert m["sheet"] is None                           # not served...
+    assert key not in margin._deep_cache                # ...and evicted
+
+
+def test_a_sheet_from_an_older_shape_is_re_rolled(margin_cache, monkeypatch):
+    """The cache outlives the SHAPE. A sheet stored before a field moved would
+    otherwise come back and put a retired part of the UI back on screen — so a
+    foreign schema is a miss, and the fresh roll overwrites the stale row
+    (2026-07-26, Codex: the sheet schema bumped to @2 when king safety became a
+    tag and the eval bar went away)."""
+    submitted = []
+    monkeypatch.setattr(margin, "_pool", object())
+    monkeypatch.setattr(margin, "_sheet_schema", lambda: "lucena-plans/sheet@9")
+    monkeypatch.setattr(margin, "_stream_preroll", lambda fen, sid: None)
     monkeypatch.setattr(margin._worker, "submit", lambda *a, **k: submitted.append(a))
     margin_cache.put(OUT_OF_BOOK, SHEET, {"schema": "lucena-plans/sheet@1"})
 
     m = build(OUT_OF_BOOK)
-    assert m["plansPending"] is False                  # answered outright
-    assert m["sheet"] == {"schema": "lucena-plans/sheet@1"}
-    assert '"schema"' in m["raw"]
-    assert submitted == []                             # ...and nothing was rolled
+    assert m["plansPending"] is True                   # rolled again...
+    assert m["sheet"] is None                          # ...and the stale one is not served
+    assert len(submitted) == 1
 
 
 def test_a_finished_roll_is_stored_but_a_pending_one_is_not(margin_cache):
