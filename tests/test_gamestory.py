@@ -5,6 +5,8 @@ whole file runs in milliseconds. The engine-backed path is exercised by running
 `analyse_pgn` on a real game, which is a slow offline job, not a unit test.
 """
 
+import math
+
 import pytest
 
 from lucena_backend.pipelines.moveclass import (MoveClass, classify_move,
@@ -72,11 +74,35 @@ def test_accuracy_is_bounded_and_monotone():
 
 
 def test_one_catastrophe_is_not_averaged_away_to_nothing():
-    """The plain mean is the deliberate choice — a 40-point blunder must still
-    move the number even in a long game."""
+    """A move that loses the game must COST something a reader can feel.
+
+    This test previously asserted `> 1.5` and passed at 2.1 while the function
+    used an arithmetic mean — a bar too weak to catch the defect it existed to
+    prevent. The harmonic mean charges 12.5 for the same blunder. The bar is
+    now set where the statistic stops being misleading, not where the
+    implementation happens to land."""
     clean = accuracy([0.0] * 40)
     with_blunder = accuracy([0.0] * 39 + [40.0])
-    assert clean - with_blunder > 1.5
+    assert clean - with_blunder > 8.0, (clean, with_blunder)
+
+
+def test_a_move_that_scores_zero_cannot_break_the_average():
+    """The harmonic mean divides by each term, so a move bad enough to map to
+    0.0 would raise ZeroDivisionError without the floor. Mate-in-one exists;
+    this is reachable input, not a hypothetical."""
+    assert accuracy([100.0]) == pytest.approx(1.0, abs=0.05)   # the floor itself
+    worst = accuracy([0.0] * 20 + [100.0])
+    assert 0.0 < worst < 100.0 and math.isfinite(worst)
+    # ...and it must still be the harshest thing that can happen to a game
+    assert worst < accuracy([0.0] * 20 + [40.0])
+
+
+def test_the_worst_move_dominates_a_clean_average():
+    """Two players, same number of moves, same total error — one spread thin,
+    one concentrated in a single disaster. They must not score the same."""
+    spread = accuracy([4.0] * 10)
+    concentrated = accuracy([0.0] * 9 + [40.0])
+    assert concentrated < spread - 5.0, (concentrated, spread)
 
 
 # ---------------------------------------------------------------- moments

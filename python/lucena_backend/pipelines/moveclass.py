@@ -111,16 +111,38 @@ def classify_move(*, drop: float, played_is_best: bool, in_book: bool,
 def accuracy(drops: list[float]) -> float:
     """A 0-100 accuracy score from the per-move win-% drops.
 
-    The curve is the published lichess mapping from win-% loss to accuracy
-    (103.1668 * exp(-0.04354 * loss) - 3.1669), which pairs with the win-%
-    model `evalmodel` already uses — using a different curve on top of that
-    model would make the number mean nothing. Reported as a plain mean, which
-    is the honest reading: no volatility weighting, so one catastrophe cannot
-    be averaged away by a long tail of forced recaptures.
+    The per-move curve is the published lichess mapping from win-% loss to
+    accuracy (103.1668 * exp(-0.04354 * loss) - 3.1669), which pairs with the
+    win-% model `evalmodel` already uses — a different curve on top of that
+    model would make the number mean nothing.
+
+    They are combined with the HARMONIC mean, and the reason is the whole
+    point of the statistic. Chess is not scored per move; one move can lose
+    the game, and an average that lets forty accurate moves bury it is
+    measuring the wrong thing. Measured on the arithmetic mean this function
+    used first: forty clean moves followed by one game-losing 40-point blunder
+    scored 97.9 — the blunder cost 2.1 points. The harmonic mean charges 12.5,
+    because it is dominated by the smallest term, which is exactly the
+    behaviour "accuracy" should have.
+
+    Corroboration on ONE game, not the reason and not a compatibility claim:
+    the harmonic mean gave 76.0 / 70.8 where Chess.com reported 75.3 / 71.3,
+    while the arithmetic mean read 86.1 / 84.4. That is consistent with having
+    picked a similar aggregator on this sample. It is n=1 against an
+    unpublished formula, so it establishes nothing about agreement in general
+    — do not treat it as a promise that our numbers track theirs.
+
+    Known limitation, stated rather than hidden: any per-move mean still
+    dilutes with game length — the same blunder scores better inside a longer
+    game. Fixing that needs volatility weighting (weighting each move by how
+    much was actually at stake), which needs its own calibration work.
     """
     import math
     if not drops:
         return 100.0
     vals = [max(0.0, min(100.0, 103.1668 * math.exp(-0.04354 * max(0.0, d))
                          - 3.1669)) for d in drops]
-    return round(sum(vals) / len(vals), 1)
+    # floor each term: a mated-in-one move scores 0, and 1/0 is undefined.
+    # The floor sets how harshly a single catastrophe can pull the whole
+    # number down; 1.0 keeps it severe without letting one move zero the game.
+    return round(len(vals) / sum(1.0 / max(v, 1.0) for v in vals), 1)
