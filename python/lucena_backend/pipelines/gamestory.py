@@ -77,6 +77,9 @@ _PLAN_MIN_GAP = 6        # plies between plan chapters
 _QUIET_SWING = 6.0       # a plan chapter's position must not be mid-crisis
 _MAX_MOMENTS = 8         # walkthrough chapters; the rest stay in the ply table
 _MOMENT_GAP = 3          # plies between chapters (one flurry != four chapters)
+# The opening table names NODES, not every ply; 3 is the largest internal gap
+# measured across five real mainlines, so a 4th unnamed ply means out of book.
+_BOOK_GAP = 3
 
 
 @dataclass
@@ -121,21 +124,42 @@ def _label(plies: list[dict]) -> None:
 
     Book membership is asked of the real opening table, walking the game's own
     FEN path, so "book" ends where THIS game left theory rather than at a
-    fixed move number."""
+    fixed move number.
+
+    THE TABLE NAMES NODES, NOT EVERY PLY, so a line in perfectly good theory
+    dips out of it for a ply or two (`openings.book_name` documents the same
+    stickiness). Treating the first unnamed ply as the end of book cut this
+    game's French Exchange off at move 4 and reported 2 book plies for a line
+    that is named through move 7. Measured across five mainlines (French
+    Exchange, Ruy Morphy, Najdorf, QGD Tartakower, Four Knights) the largest
+    internal gap is 3 plies.
+
+    But tolerating a gap FORWARD grants free book plies to a player who simply
+    left theory with a bad move — after 1.d4 Nh6 the next plies would go
+    ungraded (Codex 2026-07-26). A gap is only *inside* theory if the line
+    comes BACK, and since we hold the whole game we can just look: book runs to
+    the last named ply reachable without ever exceeding _BOOK_GAP. A name that
+    appears after a longer silence is a transposition, not theory this game
+    was ever following, and does not re-open the book."""
     from lucena_core.openings import name_for
-    fens, out_of_book = [], False
-    for pr in plies:
-        fens.append(pr["fen_after"])
-        # A game is in book only while it has NEVER left it; one novelty ends
-        # it for good, even if a later transposition rejoins a named line.
-        named = None if out_of_book else name_for(pr["fen_after"])
-        if named is None:
-            out_of_book = True
-        pr["book"] = named
+    named_at = [name_for(pr["fen_after"]) for pr in plies]
+    last_named, gap = -1, 0
+    for i, nm in enumerate(named_at):
+        if nm is not None:
+            if gap > _BOOK_GAP:
+                break                    # already left; this is a transposition
+            last_named, gap = i, 0
+        else:
+            gap += 1
+            if gap > _BOOK_GAP:
+                break
+    for i, pr in enumerate(plies):
+        pr["book"] = named_at[i]
+        pr["in_book"] = i <= last_named
         drop = max(0.0, -pr["delta_win_pct"])
         cls = classify_move(drop=drop,
                             played_is_best=(pr["san"] == pr["best"]["san"]),
-                            in_book=named is not None,
+                            in_book=pr["in_book"],
                             engine_class=pr["class"],
                             gift_wp=pr.get("gift_wp", 0.0))
         pr["label"] = cls.value
@@ -152,6 +176,81 @@ def _gifts(plies: list[dict]) -> None:
 
 def _side_name(headers: dict, side: str) -> str:
     return headers.get("White" if side == "w" else "Black", "?")
+
+
+def _norm(fen: str) -> str:
+    """Position identity for repetition: the first four FEN fields (clocks and
+    move number are not part of who-stands-where)."""
+    return " ".join((fen or "").split(" ")[:4])
+
+
+def _ending(plies: list[dict], headers: dict, result: str) -> dict:
+    """How the game actually finished.
+
+    Written because the first quiet game analysed here ended by REPEATING the
+    position and the report said nothing about it — the one fact that explains
+    the result was missing while four chapters discussed castling. A draw is
+    not an absence of story; how a game stops is part of it.
+
+    Repetition is read off the board, not the headers: `Termination` says
+    "drawn by agreement" even when the players were shuffling, and a claim we
+    can verify beats one we are told."""
+    out = {"result": result, "termination": headers.get("Termination", "")}
+    if not plies:
+        return out
+
+    # Ply 0 is the position BEFORE the first move; without it a repetition of
+    # the starting position is invisible and any count that includes it is one
+    # short (Codex 2026-07-26). Occurrences carry (ply, move_no) so the opening
+    # position reports cleanly as move 1 rather than needing a special case.
+    seen: dict[str, list[tuple[int, int]]] = {}
+    if plies[0].get("fen_before"):
+        seen.setdefault(_norm(plies[0]["fen_before"]), []).append((0, 1))
+    for pr in plies:
+        seen.setdefault(_norm(pr["fen_after"]), []).append((pr["ply"], pr["move_no"]))
+
+    final = seen.get(_norm(plies[-1]["fen_after"]), [])
+    # A DECISIVE game can end in a position that happens to have occurred
+    # before — someone resigns, flags, or is mated after a repeat. Calling
+    # that "how it ended: repetition" would explain a resignation with the
+    # wrong cause, so the reader-facing ending is drawn games only. The raw
+    # signal stays available as `repeats` for anything that wants it.
+    if len(final) >= 2:
+        out["repeats"] = len(final)
+    if len(final) >= 2 and (result or "").strip() == "1/2-1/2":
+        # the cycle is what happened between two occurrences of the SAME
+        # position; name the moves so a reader can see the shuffle
+        (first, first_move), (last, _) = final[0], final[-1]
+        cycle = [p for p in plies if first < p["ply"] <= last]
+        out["repetition"] = {
+            "times": len(final),
+            "from_move": first_move,
+            "to_move": plies[-1]["move_no"],
+            "moves": [p["san"] for p in cycle],
+            # a repetition with the evaluation level is a genuine standoff; one
+            # with a side clearly better means somebody let a better game go
+            "cp_white": plies[-1].get("cp_white", 0),
+        }
+    return out
+
+
+def _opening(plies: list[dict]) -> dict:
+    """The opening this game actually played, from our own table.
+
+    `book_name` folds the whole line rather than taking the last named node,
+    because the table re-attaches COARSER names deeper in — a naive last-wins
+    walk reports a less specific opening than the game reached.
+
+    It is fed only the IN-BOOK prefix. book_name is deliberately sticky, so
+    handing it the whole game lets a late accidental transposition rename the
+    opening after the players had long left theory — contradicting the very
+    boundary _label computes (Codex 2026-07-26)."""
+    from lucena_core.openings import book_name
+    fens = [p["fen_after"] for p in plies if p.get("in_book")]
+    name = book_name(fens)
+    depth = sum(1 for p in plies if p.get("in_book"))
+    return {"name": name, "plies": depth,
+            "left_at_move": (depth // 2) + 1 if depth else None}
 
 
 def _turning_points(plies: list[dict]) -> list[Moment]:
@@ -197,17 +296,48 @@ def _moment(kind: str, pr: dict) -> Moment:
     )
 
 
-def _plan_candidates(plies: list[dict], taken: set[int]) -> list[dict]:
-    """Quiet, out-of-book, non-endgame positions, spread across the game."""
-    out, last = [], -99
+def _plan_candidates(plies: list[dict], taken: set[int],
+                     want: int = _PLAN_CHAPTERS) -> list[dict]:
+    """Quiet, out-of-book positions to read for plans, in PRIORITY order.
+
+    The order matters as much as the filter. Walking the game front to back
+    and keeping the first few that confirm put every plan chapter in the
+    opening — on a 32-move game the chapters landed on moves 8, 11, 14 and 29,
+    so three of four discussed castling and development while the middlegame
+    the players actually had to solve went unread.
+
+    So candidates are returned nearest-first to evenly spaced targets across
+    the game. Selection still walks this list in order and can skip any
+    position the plans layer declines, but it now reaches for the middlegame
+    before the fourth opening move."""
+    pool, last = [], -99
     for pr in plies:
         if pr["ply"] in taken or abs(pr["delta_win_pct"]) > _QUIET_SWING:
             continue
+        # OUT of book, as the docstring says: a theory position has nothing to
+        # teach about planning, and spending a plan read on one wastes the
+        # budget on moves we just deliberately declined to grade. The move_no
+        # bar alone missed this for long theoretical lines (Codex 2026-07-26).
+        if pr.get("in_book"):
+            continue
         if pr["ply"] - last < _PLAN_MIN_GAP or pr["move_no"] < 8:
             continue
-        out.append(pr)
+        pool.append(pr)
         last = pr["ply"]
-    return out
+    if not pool or want <= 0:
+        return pool
+
+    lo, hi = pool[0]["ply"], pool[-1]["ply"]
+    targets = [lo + (hi - lo) * (i + 0.5) / want for i in range(want)]
+    ordered, left = [], list(pool)
+    for t in targets:
+        if not left:
+            break
+        pick = min(left, key=lambda p: abs(p["ply"] - t))
+        left.remove(pick)
+        ordered.append(pick)
+    # the rest stay available as fallbacks, in game order
+    return ordered + left
 
 
 # What the player did NEXT — the window `move_intent` reads. A single move
@@ -514,7 +644,10 @@ def _patterns(plies: list[dict], moments: list[Moment], headers: dict) -> dict:
             "motifs": sorted(motifs.items(), key=lambda kv: -kv[1]),
             "counts": _counts(mine),
             "accuracy": accuracy([max(0.0, -p["delta_win_pct"]) for p in mine]),
-            "book_plies": sum(1 for p in mine if p.get("book")),
+            # in_book, not book: `book` is only the NAMED table nodes, so
+            # counting it under-reports depth on any line with a table gap —
+            # the very case _label was fixed for (Codex 2026-07-26).
+            "book_plies": sum(1 for p in mine if p.get("in_book")),
         }
     return out
 
@@ -591,7 +724,7 @@ def build_story(pgn_text: str, engine, pool, maia=None, *,
             reads[fen] = _plans_read(fen, pool, maia)
         return reads[fen]
 
-    considered = _plan_candidates(plies, seen)
+    considered = _plan_candidates(plies, seen, plan_chapters)
     tried = 0
     for pr in considered:
         if len([m for m in chosen if m.kind == "plan"]) >= plan_chapters:
@@ -630,6 +763,9 @@ def build_story(pgn_text: str, engine, pool, maia=None, *,
         "headers": dict(game.headers),
         "plies": plies,
         "arc": acts,
+        "ending": _ending(plies, dict(game.headers),
+                          analysis["game"].get("result", "")),
+        "opening": _opening(plies),
         "moments": [asdict(m) for m in moments],
         "summary": analysis["summary"],
         "patterns": _patterns(plies, moments, game.headers),

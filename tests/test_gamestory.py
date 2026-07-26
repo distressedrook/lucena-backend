@@ -277,3 +277,182 @@ def test_each_position_is_rolled_at_most_once(monkeypatch):
     monkeypatch.setattr(gs, "_plans_read", counting)
     gs.build_story("pgn", None, None, plan_chapters=2)
     assert len(calls) == len(set(calls)), f"duplicate rolls: {calls}"
+
+
+# ------------------------------------------------- book, ending, spreading
+
+def test_book_survives_the_tables_own_gaps():
+    """The opening table names NODES, not every ply. Treating the first
+    unnamed ply as the end of book cut a real French Exchange off at move 4
+    and reported 2 book plies for a line named through move 7."""
+    import chess
+    from lucena_core.openings import name_for
+    b, plies = chess.Board(), []
+    for i, san in enumerate("e4 e6 Nf3 d5 exd5 exd5 d4 Bd6 Nc3 c6".split(), 1):
+        b.push_san(san)
+        plies.append(_ply(ply=i, move_no=(i + 1) // 2,
+                          side="w" if i % 2 else "b", fen_after=b.fen()))
+    # the table really does have a hole here — that is the point of the test
+    assert name_for(plies[3]["fen_after"]) is None
+    assert name_for(plies[6]["fen_after"]) is not None
+    gs._gifts(plies)
+    gs._label(plies)
+    # the HOLE (plies 4-6) is bridged because the line RETURNS at ply 7...
+    assert all(p["in_book"] for p in plies[:7]), \
+        "a gap inside theory must not end the book"
+    # ...and book ends at the deepest named node, not three plies past it
+    assert not any(p["in_book"] for p in plies[7:])
+    assert gs._opening(plies)["name"] == "French Defense: Exchange Variation"
+    # the reader-facing tally must agree with the gate, not with the narrower
+    # "was this exact ply a named node" field (which would count only 4)
+    pat = gs._patterns(plies, [], {"White": "W", "Black": "B"})
+    assert pat["w"]["book_plies"] + pat["b"]["book_plies"] == 7
+
+
+def test_a_gap_only_counts_as_theory_if_the_line_comes_back():
+    """Tolerating unnamed plies FORWARD hands free book status to a player who
+    simply left theory with a bad move — after 1.d4 Nh6 the next plies would
+    go ungraded. The whole game is in hand, so the gap is only inside theory
+    when the line actually returns to a named position."""
+    import chess
+    from lucena_core.openings import name_for
+    b, plies = chess.Board(), []
+    for i, san in enumerate("d4 Nh6 e4 g5 Bxg5 f6".split(), 1):
+        b.push_san(san)
+        plies.append(_ply(ply=i, move_no=(i + 1) // 2,
+                          side="w" if i % 2 else "b", fen_after=b.fen()))
+    assert name_for(plies[0]["fen_after"]) is not None      # 1.d4 is named
+    assert name_for(plies[1]["fen_after"]) is None          # 1...Nh6 is not
+    gs._gifts(plies)
+    gs._label(plies)
+    assert plies[0]["in_book"], "1.d4 is theory"
+    assert not any(p["in_book"] for p in plies[1:]), \
+        "leaving theory must not buy three ungraded plies"
+
+
+def test_leaving_the_book_is_permanent():
+    """A late accidental transposition back into a named position must not
+    re-open the book twenty moves after the players left theory."""
+    import chess
+    b, plies = chess.Board(), []
+    for i, san in enumerate("a3 a6 h3 h6 a4 a5 h4 h5 Ra3 Ra6 Rb3 Rb6".split(), 1):
+        b.push_san(san)
+        plies.append(_ply(ply=i, move_no=(i + 1) // 2,
+                          side="w" if i % 2 else "b", fen_after=b.fen()))
+    gs._gifts(plies)
+    gs._label(plies)
+    assert not plies[-1]["in_book"]
+    # and the shielding must stop at the exit, not three plies past it
+    assert sum(1 for p in plies if p["in_book"]) < len(plies)
+
+
+def test_a_repetition_is_read_off_the_board_not_the_headers():
+    """This game's PGN says "drawn by agreement" while the players were
+    shuffling. A claim we can verify beats one we are told."""
+    import chess
+    b, plies = chess.Board(), []
+    # a real shuffle: knights out and back, returning to the same position
+    for i, san in enumerate("Nf3 Nf6 Ng1 Ng8 Nf3 Nf6 Ng1 Ng8".split(), 1):
+        b.push_san(san)
+        plies.append(_ply(ply=i, move_no=(i + 1) // 2,
+                          side="w" if i % 2 else "b", fen_after=b.fen()))
+    rep = gs._ending(plies, {"Termination": "Game drawn by agreement"},
+                     "1/2-1/2")["repetition"]
+    assert rep["times"] >= 2 and rep["moves"]
+
+
+def test_the_starting_position_counts_as_an_occurrence():
+    """Repetition history built only from fen_after cannot see the opening
+    position, so a knights-out-and-back shuffle reports one repeat too few."""
+    import chess
+    b, plies = chess.Board(), []
+    start = b.fen()
+    for i, san in enumerate("Nf3 Nf6 Ng1 Ng8".split(), 1):
+        pr = _ply(ply=i, move_no=(i + 1) // 2, side="w" if i % 2 else "b",
+                  fen_before=b.fen())
+        b.push_san(san)
+        pr["fen_after"] = b.fen()
+        plies.append(pr)
+    assert gs._norm(plies[-1]["fen_after"]) == gs._norm(start)
+    rep = gs._ending(plies, {}, "1/2-1/2")["repetition"]
+    assert rep["times"] == 2, "the start position is the first occurrence"
+    assert rep["from_move"] == 1
+
+
+def test_a_resignation_after_a_repeat_is_not_a_repetition_ending():
+    """You can resign in a position that has occurred before. Explaining that
+    resignation as a repetition would give the reader the wrong cause."""
+    import chess
+    b, plies = chess.Board(), []
+    for i, san in enumerate("Nf3 Nf6 Ng1 Ng8".split(), 1):
+        pr = _ply(ply=i, move_no=(i + 1) // 2, side="w" if i % 2 else "b",
+                  fen_before=b.fen())
+        b.push_san(san)
+        pr["fen_after"] = b.fen()
+        plies.append(pr)
+    lost = gs._ending(plies, {"Termination": "White resigned"}, "0-1")
+    assert "repetition" not in lost
+    assert lost["repeats"] == 2, "the raw signal is still available"
+    assert "repetition" in gs._ending(plies, {}, "1/2-1/2")
+
+
+def test_a_decisive_game_reports_no_repetition():
+    import chess
+    b, plies = chess.Board(), []
+    for i, san in enumerate("e4 e5 Nf3 Nc6 Bc4 Bc5".split(), 1):
+        b.push_san(san)
+        plies.append(_ply(ply=i, move_no=(i + 1) // 2,
+                          side="w" if i % 2 else "b", fen_after=b.fen()))
+    assert "repetition" not in gs._ending(plies, {}, "1-0")
+
+
+def test_plan_candidates_reach_the_middlegame_before_the_fourth_opening_move():
+    """Walking front to back put every plan chapter in the opening — three of
+    four chapters discussed castling while the middlegame went unread."""
+    plies = [_ply(ply=i, move_no=(i + 1) // 2, side="w" if i % 2 else "b")
+             for i in range(1, 65)]
+    order = [p["move_no"] for p in gs._plan_candidates(plies, set(), 4)]
+    assert order, "there should be candidates in a 32-move game"
+    # the first four tried must span the game, not cluster in its first act
+    first_four = order[:4]
+    assert max(first_four) - min(first_four) > 12, first_four
+    # and nothing is discarded — the rest remain as fallbacks
+    assert len(order) == len(set(order))
+
+
+def test_a_transposition_after_the_book_closed_cannot_rename_the_opening():
+    """book_name is deliberately sticky, so handing it the whole game lets a
+    late accidental transposition rename the opening long after the players
+    left theory — contradicting the boundary _label just computed."""
+    plies = [_ply(ply=i, move_no=(i + 1) // 2, side="w" if i % 2 else "b",
+                  fen_after=f"F{i}") for i in range(1, 9)]
+    for i, p in enumerate(plies):
+        p["in_book"] = i < 2                       # book closed after 2 plies
+    seen = []
+
+    def fake_book_name(fens):
+        seen.append(list(fens))
+        return "Some Opening"
+    import lucena_core.openings as op
+    old = op.book_name
+    op.book_name = fake_book_name
+    try:
+        gs._opening(plies)
+    finally:
+        op.book_name = old
+    assert seen and seen[0] == ["F1", "F2"], \
+        f"only the in-book prefix may name the opening, got {seen}"
+
+
+def test_a_theory_position_is_never_spent_on_a_plan_chapter():
+    """A book position has nothing to teach about planning, and reading one
+    burns budget on a move we just declined to grade."""
+    plies = []
+    for i in range(1, 41):
+        p = _ply(ply=i, move_no=(i + 1) // 2, side="w" if i % 2 else "b")
+        p["in_book"] = i <= 24                     # a long theoretical line
+        plies.append(p)
+    got = gs._plan_candidates(plies, set(), 4)
+    assert got, "the out-of-book tail should still supply candidates"
+    assert all(not p["in_book"] for p in got)
+    assert min(p["ply"] for p in got) > 24

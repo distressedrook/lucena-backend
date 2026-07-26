@@ -156,6 +156,27 @@ def _curve(story: dict, width: int = 900, height: int = 150) -> str:
 </svg>"""
 
 
+def _ending_line(story: dict) -> str:
+    """How the game stopped. For a repetition draw this IS the story, and the
+    first quiet game analysed here printed four chapters about castling while
+    saying nothing about the shuffle that ended it."""
+    e = story.get("ending") or {}
+    rep = e.get("repetition")
+    if not rep:
+        return ""
+    cp = rep.get("cp_white", 0)
+    read = ("with the position level — a genuine standoff, neither side able "
+            "to make progress" if abs(cp) < 50 else
+            f"with {'White' if cp > 0 else 'Black'} still holding the better "
+            f"position — the better game was let go")
+    moves = " ".join(rep.get("moves") or [])
+    return f"""<div class="ending">
+      <h3>How it ended: repetition</h3>
+      <p>The same position appeared {rep['times']} times, {_e(read)}.</p>
+      <p class="pv">from move {rep['from_move']}: {_e(moves)}</p>
+    </div>"""
+
+
 def _acts(story: dict) -> str:
     """The arc, as a sentence per act."""
     say = {"level": "level", "edge": "a slight edge for {}",
@@ -359,6 +380,13 @@ def render(story: dict) -> str:
     term = h.get("Termination", "")
     result = g.get("result") or h.get("Result", "")
 
+    op = story.get("opening") or {}
+    opening_line = ""
+    if op.get("name"):
+        opening_line = (f"<p class='opening'>{_e(op['name'])}"
+                        + (f" <span>— theory to move {op['left_at_move']}</span>"
+                           if op.get("left_at_move") else "") + "</p>")
+
     chapters = "".join(_moment_html(m, h) for m in story["moments"])
     dropped = story.get("moments_dropped", 0)
     note = ""
@@ -422,6 +450,13 @@ def render(story: dict) -> str:
    border:1px solid var(--ink); padding:2px 10px; }}
  .sub {{ color:var(--muted); font-size:14px; margin:0 0 4px; }}
 
+ .opening {{ font-size:15px; margin:2px 0 0; }}
+ .opening span {{ color:var(--muted); font-size:13px; }}
+ .ending {{ border:1px solid var(--rule); background:var(--card);
+   padding:14px 16px; margin-top:20px; }}
+ .ending h3 {{ font-size:13px; letter-spacing:0.08em; text-transform:uppercase;
+   color:var(--muted); margin-bottom:6px; }}
+ .ending p {{ margin:0 0 4px; }}
  .curve {{ width:100%; height:auto; display:block; margin:10px 0 4px;
    border:1px solid var(--rule); }}
  .curve-key {{ display:flex; justify-content:space-between;
@@ -533,6 +568,7 @@ def render(story: dict) -> str:
 </div>
 <p class="sub">{_e(we)} vs {_e(be)} · {_e(h.get('TimeControl',''))}
    {("· " + _e(term)) if term else ""}</p>
+{opening_line}
 
 <section id="shape">
   <h2>The shape of the game</h2>
@@ -543,6 +579,7 @@ def render(story: dict) -> str:
   <div class="curve-key"><span>{_e(white)} better ↑</span>
     <span>{_e(black)} better ↓</span></div>
   {_acts(story)}
+  {_ending_line(story)}
 </section>
 
 <section id="scorecard">
