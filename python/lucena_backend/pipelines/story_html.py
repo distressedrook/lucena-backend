@@ -483,6 +483,16 @@ def render(story: dict) -> str:
                         + (f" <span>— theory to move {op['left_at_move']}</span>"
                            if op.get("left_at_move") else "") + "</p>")
 
+    hidden = sum(m.get("plans_hidden", 0) for m in story["moments"])
+    hidden_note = ""
+    if hidden:
+        hidden_note = (
+            f"<br>{hidden} further plan{'s' if hidden != 1 else ''} were "
+            f"detected across these positions but not printed: either the "
+            f"engine did not confirm them here, or they were near-universal "
+            f"advice that fits almost any position. They remain in the "
+            f"underlying data.")
+
     chapters = "".join(_moment_html(m, h) for m in story["moments"])
     dropped = story.get("moments_dropped", 0)
     note = ""
@@ -702,7 +712,10 @@ def render(story: dict) -> str:
 <section id="walkthrough">
   <h2>The moments</h2>
   <p class="lede">Where the game was actually decided — and, in the quiet
-     positions between, the plan the structure was asking for.</p>
+     positions between, the plan the structure was asking for. A plan is
+     printed only if the engine confirmed it in one of its own equal-value
+     lines <em>and</em> it says something specific about this position;
+     everything else is held back rather than padding the page.</p>
   {note}
   {chapters}
 </section>
@@ -726,6 +739,6 @@ def render(story: dict) -> str:
   {len(story['plies'])} plies · {story.get('moments_found',0)} moments found ·
   {story.get('plan_chapters_shown',0)} of
   {story.get('plan_chapters_read', story.get('plan_chapters_considered',0))}
-  quiet positions read carried an engine-confirmed plan.
+  quiet positions read carried an engine-confirmed plan.{hidden_note}
 </footer>
 </div>"""

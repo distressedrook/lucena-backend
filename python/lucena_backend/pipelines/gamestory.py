@@ -31,6 +31,7 @@ table. A tally is not a diagnosis and the renderer must not dress it as one.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field, asdict
 
 import chess
@@ -128,6 +129,8 @@ class Moment:
     span_to_move: int = 0         # drift only: where the slide ended
     span_cost: float = 0.0        # drift only: win% shed across the run
     span_moves: list = field(default_factory=list)
+    read_full: str = ""           # everything the layer found (research)
+    plans_hidden: int = 0         # how many did not clear the product bar
 
 
 def _label(plies: list[dict]) -> None:
@@ -586,6 +589,71 @@ def _alignment(intent: list[str], plans: dict, side: str, label: str) -> dict:
     return {"state": "on-plan", "families": hit, "tier": best}
 
 
+# THE PRODUCT BAR (owner ruling 2026-07-27, after auditing three real games).
+# We were printing 142 plan claims across three games — ~47 a game — and 46%
+# of them were near-universal plans that fire in almost any position. A 1750
+# player told to "castle kingside: get the king to safety" learns nothing, and
+# the filler makes the one line that matters ("the bishop on f1 is bad, your
+# own pawns sit on its colour") impossible to find.
+#
+# The project's own v1 principle already said this — "where the vocabulary
+# cannot explain a moment, v1 says less rather than inventing" — and the
+# implementation was violating it. So the reader now sees ONLY plans that are
+# engine-confirmed AND carry an idea specific to this position. Everything
+# else stays in the JSON for research; nothing is deleted, only unpublished.
+#
+# Measured effect: 93 claims -> 15 on the blitz game, 31 -> 8 on the Pirc,
+# 18 -> 1 on the quiet French. That last number is not a bug in the filter; it
+# is the honest state of the plan vocabulary in a quiet middlegame, and it is
+# better shown than hidden behind forty lines of castling advice.
+_NEAR_UNIVERSAL = ("castle", "complete development", "rook activation",
+                   "double on the file", "simplify", "avoid trades",
+                   "prophylaxis", "keep the king uncastled", "deny castling")
+
+# a plan line in position_read's prose: "- _Engine confirmed_ — <idea>"
+_PLAN_LINE = re.compile(r"^-\s+_([^_]+)_\s+[—-]\s+(.*)$")
+_ENGINE_TAG = "engine confirmed"
+
+
+def _publishable(idea: str) -> bool:
+    """Is this plan specific enough to be worth a reader's attention?"""
+    head = idea.split(":")[0].strip().lower()
+    return not any(u in head for u in _NEAR_UNIVERSAL)
+
+
+def _prune_read(text: str) -> tuple[str, int]:
+    """Drop every plan the reader should not see; keep all the FACTS.
+
+    Weakness bullets, the assessment and the structure line are untouched —
+    they are observations about the board, not advice, and they were never the
+    problem. Only tier-tagged plan lines are filtered."""
+    if not text:
+        return "", 0
+    out, hidden, seen = [], 0, set()
+    for line in text.split("\n"):
+        m = _PLAN_LINE.match(line.strip())
+        if not m:
+            out.append(line)
+            continue
+        tier, idea = m.group(1).strip().lower(), m.group(2).strip()
+        key = idea.lower()
+        if tier != _ENGINE_TAG or not _publishable(idea) or key in seen:
+            hidden += 1
+            continue
+        seen.add(key)          # the same idea twice in one chapter is once
+        out.append(line)
+    # a side heading left with nothing under it is noise; drop empty sections
+    pruned = []
+    for i, line in enumerate(out):
+        if line.strip().startswith("**") and line.strip().endswith("**"):
+            rest = out[i + 1:]
+            nxt = next((r for r in rest if r.strip()), "")
+            if nxt.strip().startswith("**") or not nxt.strip():
+                continue
+        pruned.append(line)
+    return "\n".join(pruned).strip(), hidden
+
+
 def _static_read(fen: str) -> dict:
     """Everything the no-engine detectors know about one position."""
     import sys
@@ -903,10 +971,15 @@ def build_story(pgn_text: str, engine, pool, maia=None, *,
             break
         tried += 1
         pl = read_for(pr["fen_before"])
-        confirmed = any(p["tier"] == "engine"
-                        for side in ("white", "black")
-                        for p in (pl.get("plans") or {}).get(side, []))
-        if pl.get("read") and confirmed:
+        # The chapter must clear the SAME bar the reader sees. Admitting one
+        # on any engine-tier plan let a candidate qualify on "castle
+        # queenside", then render empty after pruning — and it consumed the
+        # slot a position with a real plan could have used (Codex 2026-07-27).
+        publishable = any(p["tier"] == "engine" and _publishable(p["idea"])
+                          for side in ("white", "black")
+                          for p in (pl.get("plans") or {}).get(side, []))
+        kept, _hidden = _prune_read(pl.get("read") or "")
+        if kept and publishable:
             chosen.append(_moment("plan", pr))
     plan_shown = len([m for m in chosen if m.kind == "plan"])
     moments = sorted(chosen, key=lambda m: m.ply)
@@ -918,7 +991,8 @@ def build_story(pgn_text: str, engine, pool, maia=None, *,
         m.structure, m.weaknesses = st["structure"], st["weaknesses"]
         pl = read_for(fen)
         m.plans = pl.get("plans", {})
-        m.read = pl.get("read", "")
+        m.read_full = pl.get("read", "")
+        m.read, m.plans_hidden = _prune_read(m.read_full)
         m.character = pl.get("character", "")
         m.character_why = pl.get("character_why", "")
         m.initiative = pl.get("initiative", {})

@@ -224,6 +224,8 @@ def _fake_game(monkeypatch, n_plies=30):
         "phase": "middlegame", "developed": {}, "structure": "", "weaknesses": {}})
     monkeypatch.setattr(gs, "move_intent", lambda *a, **k: [])
     monkeypatch.setattr(gs, "game_phase", lambda fen: {"phase": "middlegame"})
+    monkeypatch.setattr(gs, "_tracks",
+                        lambda p: {"activity": [], "initiative": [], "bases": {}})
     return plies
 
 
@@ -647,3 +649,99 @@ def test_the_opponent_handing_it_back_also_ends_the_slide():
     got = gs._drift(plies)
     assert "w" not in [m.side for m in got], \
         f"White's two runs are separated by Black's gift: {[(m.side, m.span_cost) for m in got]}"
+
+
+# ------------------------------------------------- the product bar
+
+_READ = """White is slightly better — placid.
+
+**White**
+- Doubled pawns on the d-file.
+- _Engine confirmed_ — Free the bad bishop on c2: push a same-color pawn off its color.
+- _Engine confirmed_ — Castle kingside: get the king to safety.
+- _Engine confirmed_ — Free the bad bishop on c2: push a same-color pawn off its color.
+- _Strong humans play this_ — Harvest the weak pawn on f7.
+- _The structure suggests this_ — Rook activation: put a rook on the open/semi-open file.
+
+**Black**
+- _The structure suggests this_ — Simplify: trade pieces.
+"""
+
+
+def test_only_engine_confirmed_and_specific_plans_reach_the_reader():
+    """46% of what we printed was near-universal advice. A 1750 player told to
+    "castle kingside: get the king to safety" learns nothing, and the filler
+    buries the one line that matters."""
+    text, hidden = gs._prune_read(_READ)
+    assert "Free the bad bishop on c2" in text
+    assert "Castle kingside" not in text, "engine-confirmed but near-universal"
+    assert "Strong humans play this" not in text
+    assert "structure suggests" not in text
+    assert hidden == 5, (hidden, text)
+
+
+def test_facts_are_never_pruned_only_plans():
+    """Weakness bullets and the assessment are observations about the board,
+    not advice — they were never the problem."""
+    text, _ = gs._prune_read(_READ)
+    assert "Doubled pawns on the d-file." in text
+    assert text.startswith("White is slightly better")
+
+
+def test_the_same_idea_is_not_printed_twice_in_one_chapter():
+    text, _ = gs._prune_read(_READ)
+    assert text.count("Free the bad bishop on c2") == 1
+
+
+def test_a_side_left_with_nothing_to_say_gets_no_empty_heading():
+    text, _ = gs._prune_read(_READ)
+    assert "**Black**" not in text, text
+
+
+def test_pruning_an_empty_read_is_safe():
+    assert gs._prune_read("") == ("", 0)
+    assert gs._prune_read(None) == ("", 0)
+
+
+def test_a_plan_chapter_must_clear_the_same_bar_the_reader_sees(monkeypatch):
+    """Admitting a chapter on ANY engine-tier plan let one qualify on "castle
+    queenside" and then render empty after pruning — and it consumed the slot
+    a position with a real plan could have used."""
+    _fake_game(monkeypatch)
+    monkeypatch.setattr(gs, "_plans_read", lambda *a, **k: {
+        "read": "**White**\n- _Engine confirmed_ — Castle kingside: get the "
+                "king to safety.\n",
+        "plans": {"white": [{"idea": "Castle kingside: get the king to safety",
+                             "families": ["castle_kingside"], "tier": "engine"}],
+                  "black": []},
+        "character": "", "character_why": "", "initiative": {},
+        "king_risk": {}, "only_move": False})
+    story = gs.build_story("pgn", None, None)
+    assert [m for m in story["moments"] if m["kind"] == "plan"] == []
+    assert story["plan_chapters_shown"] == 0
+
+
+def _pat():
+    return {"name": "x", "moves": 1, "errors": 0, "error_rate": 0.0,
+            "by_phase": {}, "worst": 0.0, "missed": 0, "motifs": [],
+            "counts": {}, "accuracy": 100.0, "book_plies": 0}
+
+
+def test_the_page_says_how_many_plans_it_held_back():
+    """No silent caps: a reader must be told the page is not showing
+    everything that was found."""
+    from lucena_backend.pipelines.story_html import render
+    moment = dict(kind="plan", ply=1, move_no=1, side="w", san="e4",
+                  fen_before="", fen_after="", eval_cp=0, win_pct=50.0,
+                  delta_win_pct=0.0, cls="ok", label="best", symbol="",
+                  plans_hidden=7, motifs=[], weaknesses={}, plans={}, read="",
+                  endgame=[], alignment={}, initiative={}, king_risk={},
+                  best_pv_san=[], refutation_pv=[], best_san="", character="",
+                  character_why="", structure="", gift_wp=0.0, uci="",
+                  only_move=False, intent=[], span_moves=[])
+    html = render({"schema": "x", "headers": {}, "game": {"result": "1-0"},
+                   "plies": [_ply(ply=1, move_no=1, side="w", eval_cp=10)],
+                   "arc": [], "moments": [moment], "summary": {},
+                   "patterns": {"w": _pat(), "b": _pat()},
+                   "tracks": {}, "opening": {}, "ending": {}})
+    assert "7 further plan" in html, "the held-back count must reach the page"
