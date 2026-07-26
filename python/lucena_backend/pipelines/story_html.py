@@ -55,6 +55,7 @@ TIER_STYLE = {
 KIND_TITLE = {
     "turning": "Turning point",
     "missed":  "Missed win",
+    "drift":   "The slow slide",
     "plan":    "The plan on offer",
 }
 
@@ -292,6 +293,18 @@ def _plans_block(m: dict) -> str:
     return f"<div class='menus'>{''.join(out)}</div>" if out else ""
 
 
+def _endgame_block(m: dict) -> str:
+    """The endgame facts, where there are any. Kept visually distinct from the
+    plans read because it carries a different contract — geometry a reader can
+    check, with no engine or corpus claim behind it."""
+    lines = m.get("endgame") or []
+    if not lines:
+        return ""
+    items = "".join(f"<li>{_e(x)}</li>" for x in lines)
+    return (f"<div class='endgame-read'><h4>The endgame</h4>"
+            f"<ul>{items}</ul></div>")
+
+
 def _alignment_note(m: dict) -> str:
     """The sentence that is ours alone: plan on offer vs plan actually played."""
     a = m.get("alignment") or {}
@@ -319,8 +332,19 @@ def _moment_html(m: dict, headers: dict) -> str:
     num = f"{m['move_no']}{'.' if m['side'] == 'w' else '…'}"
     kind = KIND_TITLE.get(m["kind"], m["kind"].title())
 
+    if m["kind"] == "drift":
+        moves = " · ".join(m.get("span_moves") or [])
+        drift = (f"<p class='cost'>No single mistake here. Between moves "
+                 f"{m['move_no']} and {m.get('span_to_move')}, "
+                 f"<b>{m.get('span_cost', 0):.1f}</b> points of winning "
+                 f"chances went in {len(m.get('span_moves') or [])} small "
+                 f"concessions.</p>"
+                 f"<p class='pv'>{_e(moves)}</p>")
+    else:
+        drift = ""
+
     cost = ""
-    if m["kind"] != "plan" and m["delta_win_pct"] < 0:
+    if m["kind"] not in ("plan", "drift") and m["delta_win_pct"] < 0:
         cost = (f"<p class='cost'>Cost: <b>{abs(m['delta_win_pct']):.1f}</b> "
                 f"points of winning chances.</p>")
     gift = ""
@@ -330,7 +354,8 @@ def _moment_html(m: dict, headers: dict) -> str:
                 f"back.</p>")
 
     better = ""
-    if m["kind"] != "plan" and m.get("best_san") and m["best_san"] != m["san"]:
+    if (m["kind"] not in ("plan", "drift") and m.get("best_san")
+            and m["best_san"] != m["san"]):
         # the PV opens WITH the best move — printing both reads "Instead c3 c3"
         pv = " ".join((m.get("best_pv_san") or [])[1:])
         better = (f"<p class='line'><span class='k'>Instead</span> "
@@ -366,10 +391,11 @@ def _moment_html(m: dict, headers: dict) -> str:
   <div class="body">
     <div class="diagram">{_board_svg(m['fen_before'], m.get('uci', ''))}</div>
     <div class="prose">
-      {cost}{gift}{better}{refut}
+      {drift}{cost}{gift}{better}{refut}
       <div class="facts">{''.join(facts)}</div>
       {_alignment_note(m)}
       <div class="read-block">{_md(m.get('read', ''))}</div>
+      {_endgame_block(m)}
     </div>
   </div>
 </article>"""
@@ -569,6 +595,7 @@ def render(story: dict) -> str:
    color:var(--muted); }}
  .moment.missed .kind {{ color:#A6392E; }}
  .moment.plan .kind {{ color:#3A6EA5; }}
+ .moment.drift .kind {{ color:#B8860B; }}
  .moment h3 {{ font-size:23px; margin:3px 0; display:flex;
    align-items:center; gap:10px; flex-wrap:wrap; }}
  .num {{ font-family:Menlo,monospace; color:var(--muted); }}
@@ -590,6 +617,12 @@ def render(story: dict) -> str:
    background:var(--card); font-size:14.5px; }}
  .align.right {{ border-color:#B8860B; }}
  .align.on {{ border-color:#2E7D5B; }}
+ .endgame-read {{ margin-top:14px; border-left:3px solid #3A6EA5;
+   padding:8px 12px; background:var(--card); }}
+ .endgame-read h4 {{ font-size:11px; letter-spacing:0.08em;
+   text-transform:uppercase; color:var(--muted); margin-bottom:4px; }}
+ .endgame-read ul {{ margin:0; padding-left:16px; font-size:14.5px; }}
+ .endgame-read li {{ margin:2px 0; }}
  .read-block {{ margin-top:14px; font-size:15px; }}
  .read-block p {{ margin:8px 0 4px; }}
  ul.read {{ margin:4px 0 10px; padding-left:18px; }}

@@ -512,3 +512,138 @@ def test_a_position_with_no_following_line_degrades_and_says_so():
     # renderer's own count was wrong until this test was written
     assert sum(n for k, n in t["bases"].items()
                if k.startswith("geometry-prior")) == len(plies), t["bases"]
+
+
+# ------------------------------------------------- the endgame read
+
+def test_the_endgame_read_names_the_material_and_the_passer():
+    """The game that prompted this module was decided by a passed c-pawn
+    racing while White's king was outside its square. Both facts must survive."""
+    from lucena_backend.pipelines.endgame import read, sentences
+    # after 57...bxc3 in the sample game: same-coloured bishops, Black's c3
+    # passer running, Black's king centralised on d4, White's king on f6
+    fen = "8/8/p4Kp1/P6p/3k3P/2pb2P1/8/3B4 w - - 0 58"
+    r = read(fen)
+    assert r is not None and "bishop" in r["type"]
+    # Black has TWO passers here — the a-pawn as well as the racing c-pawn
+    black = {p["square"]: p for p in r["passers"] if p["side"] == "black"}
+    assert "c3" in black, sorted(black)
+    assert not black["c3"]["caught"]
+    assert r["kings"]["leader"] == "black"
+    text = " ".join(sentences(r))
+    assert "c3" in text and "outside its square" in text
+
+
+def test_a_middlegame_position_gets_no_endgame_read():
+    from lucena_backend.pipelines.endgame import read
+    assert read("r1bq1rk1/pp2ppbp/2np1np1/8/2BNP3/2N1B3/PPP2PPP/R2Q1RK1 w - - 0 9") is None
+
+
+def test_the_square_rule_accounts_for_the_defenders_tempo():
+    """The classic rule is off by one unless you count whose move it is."""
+    from lucena_backend.pipelines.endgame import read
+    # White pawn h5, Black king d5: catchable only with the tempo in hand
+    caught = read("8/8/8/3k3P/8/8/8/4K3 b - - 0 1")["passers"]
+    racing = read("8/8/8/3k3P/8/8/8/4K3 w - - 0 1")["passers"]
+    assert caught and racing
+    assert caught[0]["caught"] is True, "Black to move catches it"
+    assert racing[0]["caught"] is False, "White to move promotes"
+
+
+def test_a_passer_is_not_counted_against_its_own_bishop():
+    """A passed pawn on the bishop's colour is the asset being escorted, not
+    an obstruction — counting it turned a winning bishop-and-passer into a
+    longer bad-bishop complaint."""
+    from lucena_backend.pipelines.endgame import read
+    r = read("8/8/p4Kp1/P6p/3k3P/3b2P1/2p5/3B4 w - - 0 59")
+    bf = [x for x in r["bishops"] if x["side"] == "black"]
+    if bf:
+        assert "c2" not in bf[0]["squares"], bf[0]["squares"]
+
+
+def test_middlegame_weakness_vocabulary_stands_down_in_the_endgame():
+    """A weak colour complex needs pieces to exploit it; printed over a bishop
+    ending it is noise dressed as analysis."""
+    eg = gs._static_read("8/8/p4Kp1/P6p/3k3P/2pb2P1/8/3B4 w - - 0 58")
+    assert eg["phase"] == "endgame"
+    for tag in ("white", "black"):
+        assert not (set(eg["weaknesses"][tag]) & gs._MIDDLEGAME_ONLY), \
+            eg["weaknesses"][tag]
+    # ...but it still speaks in a middlegame
+    mg = gs._static_read("2kr3r/1pp2p2/1b1p4/3p1qp1/1P5p/2P1R2P/P4PP1/R2QKB2 b Q - 0 20")
+    assert mg["phase"] != "endgame"
+
+
+# ------------------------------------------------- the slow slide
+
+def _slide(concessions, n=26):
+    """Plies with a CONSISTENT running win% — the drift reader measures net
+    ground lost across a span, so a fixture with a frozen win_pct would test
+    nothing. `concessions` maps ply index -> win% the mover sheds."""
+    plies, wp = [], 50.0
+    for i in range(1, n + 1):
+        side = "w" if i % 2 else "b"
+        drop = concessions.get(i - 1, 0.0)
+        wp = wp - drop if side == "w" else wp + drop   # White's standing
+        p = _ply(ply=i, move_no=(i + 1) // 2, side=side,
+                 delta_win_pct=-drop,
+                 win_pct=(wp if side == "w" else 100.0 - wp))
+        plies.append(p)
+    return plies
+
+
+def test_a_game_lost_without_a_blunder_still_gets_a_chapter():
+    """The turning-point and missed readers both need ONE move to cross a bar,
+    so a technical collapse was invisible: five inaccuracies of 6-9.5 win%
+    lost a level endgame and the walkthrough had nothing to say about it."""
+    got = gs._drift(_slide({0: 6.1, 2: 6.0, 4: 8.5, 6: 9.2, 8: 9.5}))
+    assert len(got) == 1, [(m.move_no, m.span_cost) for m in got]
+    d = got[0]
+    assert d.side == "w" and d.span_cost >= gs._DRIFT_TOTAL
+    assert d.move_no == 1 and d.span_to_move == 5
+    assert len(d.span_moves) == 5
+
+
+def test_ordinary_wobble_is_not_a_slide():
+    """Summing every small drop over a dozen moves reaches 40+ points in any
+    normal game — that fired a slide on a game with ZERO errors by either side
+    and on a side that was winning. Only real concessions count, and the span
+    is measured by net ground lost."""
+    assert gs._drift(_slide({i: 3.0 for i in range(0, 24, 2)})) == []
+
+
+def test_two_concessions_are_not_a_slide():
+    assert gs._drift(_slide({0: 12.0, 2: 12.0})) == []
+
+
+def test_a_real_mistake_owns_its_ground_instead_of_the_slide():
+    """If one move crosses the turning-point bar it is a turning point, and
+    the drift reader must stand aside rather than double-count it."""
+    plies = _slide({0: 9.0, 2: 9.0, 4: 30.0})
+    assert gs._drift(plies) == []
+    assert len(gs._turning_points(plies)) == 1
+
+
+def test_recovering_the_ground_ends_the_slide():
+    """A player who gives a little and wins it straight back has not drifted."""
+    assert gs._drift(_slide({0: 9.0, 2: 9.0, 4: -20.0, 6: 9.0, 8: 9.0})) == []
+
+
+def test_a_drift_is_ranked_by_the_whole_slide_not_its_first_move():
+    d, = gs._drift(_slide({0: 8.0, 2: 8.0, 4: 8.0}))
+    assert gs._rank(d) > 20.0, gs._rank(d)
+
+
+def test_the_opponent_handing_it_back_also_ends_the_slide():
+    """A per-side scan cannot see the opponent's errors, so two separated
+    collapses got merged into one continuous slide that never happened."""
+    plies = [_ply(ply=i, move_no=(i + 1) // 2, side="w" if i % 2 else "b")
+             for i in range(1, 25)]
+    for i in (0, 2):
+        plies[i]["delta_win_pct"] = -9.0       # White concedes
+    plies[5]["delta_win_pct"] = -25.0          # BLACK blunders it back
+    for i in (6, 8):
+        plies[i]["delta_win_pct"] = -9.0       # White concedes again, later
+    got = gs._drift(plies)
+    assert "w" not in [m.side for m in got], \
+        f"White's two runs are separated by Black's gift: {[(m.side, m.span_cost) for m in got]}"

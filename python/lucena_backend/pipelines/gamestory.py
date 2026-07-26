@@ -77,9 +77,16 @@ _PLAN_MIN_GAP = 6        # plies between plan chapters
 _QUIET_SWING = 6.0       # a plan chapter's position must not be mid-crisis
 _MAX_MOMENTS = 8         # walkthrough chapters; the rest stay in the ply table
 _MOMENT_GAP = 3          # plies between chapters (one flurry != four chapters)
+# A slide worth a chapter. Two turning points' worth of ground, shed without
+# ever making a move bad enough to be called a mistake.
+_DRIFT_TOTAL = 20.0
+_DRIFT_STEP = 5.0        # a concession must be a real inaccuracy to count
+_DRIFT_MOVES = 3         # ...and one or two of them is not a slide
 # The opening table names NODES, not every ply; 3 is the largest internal gap
 # measured across five real mainlines, so a 4th unnamed ply means out of book.
 _BOOK_GAP = 3
+# Weakness terms that need a middlegame's worth of pieces to mean anything.
+_MIDDLEGAME_ONLY = {"weak_color_complex", "exposed_king", "back_rank_weak"}
 
 
 @dataclass
@@ -117,6 +124,10 @@ class Moment:
     only_move: bool = False
     intent: list = field(default_factory=list)
     alignment: dict = field(default_factory=dict)
+    endgame: list = field(default_factory=list)
+    span_to_move: int = 0         # drift only: where the slide ended
+    span_cost: float = 0.0        # drift only: win% shed across the run
+    span_moves: list = field(default_factory=list)
 
 
 def _label(plies: list[dict]) -> None:
@@ -356,6 +367,85 @@ def _missed(plies: list[dict]) -> list[Moment]:
     return out
 
 
+def _drift(plies: list[dict]) -> list[Moment]:
+    """A game lost WITHOUT a blunder — ground shed a little at a time.
+
+    The turning-point and missed-win readers both need one move to cross a
+    bar, so a technical collapse is invisible to them. On the game that
+    prompted this, White lost a level endgame across moves 40-57 in five
+    separate inaccuracies of 6-9.5 win% each: not one of them reached the
+    10-point turning-point bar, the walkthrough had no chapter for any of it,
+    and the phase that decided the game went unmentioned.
+
+    A drift is a run of one side's own moves that sheds _DRIFT_TOTAL between
+    them while NO single move crosses the turning-point bar — if one does, it
+    is a turning point and this reader stands aside for it. The moment is
+    anchored at the start of the run, because "here is where it began to go
+    wrong" is the useful board to show.
+
+    The run is reported WHOLE. Emitting the moment the threshold is crossed
+    truncated a five-move slide to its first three, which tells the reader the
+    position was lost in fewer concessions than it was.
+    """
+    out = []
+    for side in ("w", "b"):
+        run: list[dict] = []
+
+        def flush(run):
+            if len(run) < _DRIFT_MOVES:
+                return None
+            # NET ground lost across the span, not the sum of per-move drops.
+            # Summing double-counts: over a dozen moves of ordinary play the
+            # small wobbles alone reach 40+ "points" while the position has not
+            # moved at all, and that fired a slide on a game with zero errors
+            # by either side, and on a side that was winning.
+            first, last = run[0], run[-1]
+            total = (first["win_pct"] - first["delta_win_pct"]) - last["win_pct"]
+            if total < _DRIFT_TOTAL:
+                return None
+            m = _moment("drift", first)
+            m.span_to_move = last["move_no"]
+            m.span_cost = round(total, 1)
+            m.span_moves = [f"{q['move_no']}"
+                            f"{'.' if q['side'] == 'w' else '...'} {q['san']}"
+                            for q in run]
+            return m
+
+        # The WHOLE ply stream, not just this side's moves: ground can be
+        # handed back by the OPPONENT erring, and a per-side scan cannot see
+        # that — it would merge two separated collapses into one continuous
+        # "slide" that never happened (Codex 2026-07-27).
+        for pr in plies:
+            drop = -pr["delta_win_pct"]
+            if pr["side"] != side:
+                if drop > _QUIET_SWING:       # the opponent gave it back
+                    m = flush(run)
+                    if m:
+                        out.append(m)
+                    run = []
+                continue
+            # A move bad enough to be a mistake OWNS its ground — that is a
+            # turning point and this reader stands aside rather than
+            # double-counting it. Recovering it yourself ends the slide too.
+            if drop >= _TURNING_DROP or drop < -_QUIET_SWING:
+                m = flush(run)
+                if m:
+                    out.append(m)
+                run = []
+                continue
+            # Only REAL concessions join a slide. A 0.5-point wobble is the
+            # noise of ordinary play, not a step toward losing.
+            if drop >= _DRIFT_STEP:
+                run.append(pr)
+            # neutral moves neither extend the span nor break it: the slide
+            # runs from the first concession to the LAST, not to whatever
+            # quiet move happened to follow
+        m = flush(run)
+        if m:
+            out.append(m)
+    return out
+
+
 def _moment(kind: str, pr: dict) -> Moment:
     return Moment(
         kind=kind, ply=pr["ply"], move_no=pr["move_no"], side=pr["side"],
@@ -522,6 +612,12 @@ def _static_read(fen: str) -> dict:
         "structure": ", ".join(struct),
         "weaknesses": {},
     }
+    # MIDDLEGAME VOCABULARY STANDS DOWN IN THE ENDGAME. A "weak colour complex"
+    # or a soft back rank needs pieces to exploit it; printed over a bishop
+    # ending they are noise dressed as analysis, and the endgame read below
+    # says the true thing instead. Weak/backward pawns and passive rooks stay:
+    # those are exactly what a technical game is about.
+    endgame = out["phase"] == "endgame"
     for tag, color in (("white", chess.WHITE), ("black", chess.BLACK)):
         try:
             c = census(b, color)
@@ -530,8 +626,9 @@ def _static_read(fen: str) -> dict:
             c = {}
         # `total` is the census's own count field, not a weakness — printing
         # it as one would put the word "total" in a reader's weakness list.
-        out["weaknesses"][tag] = {k: v for k, v in (c or {}).items()
-                                  if v and k != "total"}
+        out["weaknesses"][tag] = {
+            k: v for k, v in (c or {}).items()
+            if v and k != "total" and not (endgame and k in _MIDDLEGAME_ONLY)}
     return out
 
 
@@ -681,13 +778,15 @@ def _arc(plies: list[dict]) -> list[dict]:
     return merged
 
 
-_RANK = {"missed": 3.0, "turning": 2.0, "plan": 1.0}
+_RANK = {"missed": 3.0, "turning": 2.0, "drift": 2.0, "plan": 1.0}
 
 
 def _rank(m: Moment) -> float:
     """How much a reader should care. Swing dominates; a missed win outranks an
     equal-sized ordinary error because it is the more actionable lesson."""
-    return abs(m.delta_win_pct) * _RANK.get(m.kind, 1.0) + m.gift_wp
+    # a drift's weight is the whole slide, not the one move it is anchored on
+    size = m.span_cost if m.kind == "drift" else abs(m.delta_win_pct)
+    return size * _RANK.get(m.kind, 1.0) + m.gift_wp
 
 
 def _patterns(plies: list[dict], moments: list[Moment], headers: dict) -> dict:
@@ -755,7 +854,7 @@ def build_story(pgn_text: str, engine, pool, maia=None, *,
 
     acts = _arc(plies)
 
-    moments = _turning_points(plies) + _missed(plies)
+    moments = _turning_points(plies) + _missed(plies) + _drift(plies)
     # A ply is one moment, not two: a missed chance that is ALSO a blunder
     # reads as the missed chance (it is the more useful sentence).
     seen, deduped = set(), []
@@ -827,6 +926,11 @@ def build_story(pgn_text: str, engine, pool, maia=None, *,
         m.only_move = pl.get("only_move", False)
         # the moves the player ACTUALLY went on to play, from this position
         cont = [q["uci"] for q in plies if q["ply"] >= m.ply][:_INTENT_PLIES]
+        # the plans layer declines endgames by design, so the endgame read is
+        # what carries a technical position — see pipelines/endgame.py
+        if m.phase == "endgame":
+            from .endgame import read as eg_read, sentences as eg_sentences
+            m.endgame = eg_sentences(eg_read(fen))
         m.intent = move_intent(m.fen_before, cont)
         m.alignment = _alignment(m.intent, m.plans, m.side, m.label)
 
