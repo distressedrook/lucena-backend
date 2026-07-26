@@ -73,7 +73,7 @@ def _board_svg(fen: str, lastmove_uci: str = "", size: int = 300) -> str:
         return chess.svg.board(
             b, size=size, lastmove=mv, coordinates=True,
             colors={"square light": WHITE_SQ, "square dark": BLACK_SQ,
-                    "margin": PAPER, "coord": MUTED,
+                    "margin": "#C8BFA9", "coord": "#4A4438",
                     "square light lastmove": "#D8CE8F",
                     "square dark lastmove": "#B3A860"},
         )
@@ -140,18 +140,18 @@ def _curve(story: dict, width: int = 900, height: int = 150) -> str:
             col = "#3A6EA5"
         marks.append(
             f"<circle cx='{x(i)}' cy='{y(plies[i].get('cp_white', 0))}' r='4.5' "
-            f"fill='{col}' stroke='{PAPER}' stroke-width='1.5'>"
+            f"fill='{col}' stroke='var(--paper)' stroke-width='1.5'>"
             f"<title>{_e(m['move_no'])}{'.' if m['side']=='w' else '...'} "
             f"{_e(m['san'])} — {_e(KIND_TITLE.get(m['kind'], ''))}</title></circle>")
 
     return f"""<svg viewBox="0 0 {width} {height}" class="curve" role="img"
  aria-label="Evaluation across the game">
- <rect x="0" y="0" width="{width}" height="{height/2}" fill="#FBF8F1"/>
- <rect x="0" y="{height/2}" width="{width}" height="{height/2}" fill="#E3DCCC"/>
- <path d="{area}" fill="#8B8574" opacity="0.35"/>
- <path d="{line}" fill="none" stroke="{INK}" stroke-width="1.6"/>
+ <rect x="0" y="0" width="{width}" height="{height/2}" fill="var(--crest)"/>
+ <rect x="0" y="{height/2}" width="{width}" height="{height/2}" fill="var(--trough)"/>
+ <path d="{area}" fill="var(--fill)" opacity="0.35"/>
+ <path d="{line}" fill="none" stroke="var(--curve)" stroke-width="1.6"/>
  <line x1="0" y1="{height/2}" x2="{width}" y2="{height/2}"
-       stroke="{MUTED}" stroke-width="1" stroke-dasharray="3 3"/>
+       stroke="var(--muted)" stroke-width="1" stroke-dasharray="3 3"/>
  {''.join(marks)}
 </svg>"""
 
@@ -372,7 +372,33 @@ def render(story: dict) -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{_e(white)} vs {_e(black)} — Lucena</title>
 <style>
- :root {{ --paper:{PAPER}; --ink:{INK}; --muted:{MUTED}; --rule:{RULE}; }}
+ /* Paper and ink is the brand (CLAUDE.md, "Annotated Board"). Dark mode is
+    not an inversion of it — it is the same page printed on a dark stock:
+    the neutrals keep their warm bias, the board keeps its contrast, and the
+    move-quality hues are lifted rather than swapped so green still reads as
+    approval on a dark ground. */
+ :root {{
+   --paper:{PAPER}; --ink:{INK}; --muted:{MUTED}; --rule:{RULE};
+   --card:#FBF8F1; --hair:#EAE4D7; --trough:#E3DCCC; --crest:#FBF8F1;
+   --curve:{INK}; --fill:#8B8574; --pv:#4A4A4A;
+ }}
+ @media (prefers-color-scheme: dark) {{
+   :root {{
+     --paper:#16150F; --ink:#EDE7D9; --muted:#9A917F; --rule:#332F26;
+     --card:#1E1C15; --hair:#2A271F; --trough:#221F18; --crest:#12110C;
+     --curve:#EDE7D9; --fill:#6E6858; --pv:#B5AD9B;
+   }}
+ }}
+ :root[data-theme="dark"] {{
+   --paper:#16150F; --ink:#EDE7D9; --muted:#9A917F; --rule:#332F26;
+   --card:#1E1C15; --hair:#2A271F; --trough:#221F18; --crest:#12110C;
+   --curve:#EDE7D9; --fill:#6E6858; --pv:#B5AD9B;
+ }}
+ :root[data-theme="light"] {{
+   --paper:{PAPER}; --ink:{INK}; --muted:{MUTED}; --rule:{RULE};
+   --card:#FBF8F1; --hair:#EAE4D7; --trough:#E3DCCC; --crest:#FBF8F1;
+   --curve:{INK}; --fill:#8B8574; --pv:#4A4A4A;
+ }}
  * {{ box-sizing:border-box; }}
  body {{ margin:0; background:var(--paper); color:var(--ink);
    font-family:Lora,"Iowan Old Style",Georgia,serif; line-height:1.55;
@@ -409,7 +435,7 @@ def render(story: dict) -> str:
 
  .cards {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr));
    gap:20px; }}
- .card {{ border:1px solid var(--rule); padding:18px; background:#FBF8F1; }}
+ .card {{ border:1px solid var(--rule); padding:18px; background:var(--card); }}
  .card h3 {{ font-size:19px; }}
  .big {{ font-family:Menlo,monospace; font-size:40px; margin:6px 0 12px;
    line-height:1; }}
@@ -445,12 +471,12 @@ def render(story: dict) -> str:
  .cost b, .gift b {{ font-family:Menlo,monospace; }}
  .line .k {{ font-size:11px; letter-spacing:0.07em; text-transform:uppercase;
    color:var(--muted); margin-right:8px; }}
- .pv {{ font-family:Menlo,monospace; font-size:13px; color:#4a4a4a; }}
+ .pv {{ font-family:Menlo,monospace; font-size:13px; color:var(--pv); }}
  .facts {{ display:flex; flex-wrap:wrap; gap:6px; margin:12px 0; }}
  .fact {{ font-size:12px; border:1px solid var(--rule); padding:2px 8px;
-   background:#FBF8F1; }}
+   background:var(--card); }}
  .align {{ border-left:3px solid var(--muted); padding:8px 12px;
-   background:#FBF8F1; font-size:14.5px; }}
+   background:var(--card); font-size:14.5px; }}
  .align.right {{ border-color:#B8860B; }}
  .align.on {{ border-color:#2E7D5B; }}
  .read-block {{ margin-top:14px; font-size:15px; }}
@@ -469,7 +495,7 @@ def render(story: dict) -> str:
  ul.bank {{ list-style:none; padding:0; margin:0; display:grid;
    grid-template-columns:repeat(auto-fit,minmax(400px,1fr)); gap:22px; }}
  ul.bank li {{ display:grid; grid-template-columns:190px 1fr; gap:16px;
-   border:1px solid var(--rule); padding:14px; background:#FBF8F1; }}
+   border:1px solid var(--rule); padding:14px; background:var(--card); }}
  .mini svg {{ width:100%; height:auto; }}
  .who {{ font-size:12px; color:var(--muted); margin:0 0 6px; }}
  .had {{ margin:0 0 6px; }}
@@ -480,9 +506,9 @@ def render(story: dict) -> str:
  table.moves th {{ text-align:left; color:var(--muted); font-weight:500;
    font-size:11px; text-transform:uppercase; letter-spacing:0.07em;
    border-bottom:1px solid var(--rule); padding:5px 8px; }}
- table.moves td {{ padding:4px 8px; border-bottom:1px solid #EAE4D7; }}
+ table.moves td {{ padding:4px 8px; border-bottom:1px solid var(--hair); }}
  table.moves tbody th {{ font-family:Menlo,monospace; color:var(--muted);
-   border-bottom:1px solid #EAE4D7; width:44px; }}
+   border-bottom:1px solid var(--hair); width:44px; }}
  .mv {{ font-family:Menlo,monospace; }}
  .cp {{ float:right; font-family:Menlo,monospace; font-size:12px;
    color:var(--muted); }}
