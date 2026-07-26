@@ -177,6 +177,76 @@ def _ending_line(story: dict) -> str:
     </div>"""
 
 
+def _track_svg(vals, plies, *, cap, colour, width=900, height=86):
+    """One signed track, White-positive above the midline.
+
+    Deliberately the same width and x-mapping as the eval curve so a reader can
+    drop a vertical line through all three charts and read one position."""
+    n = len(vals)
+    if not n:
+        return ""
+    def x(i): return round(i * width / max(1, n - 1), 1)
+    def y(v): return round(height / 2 - max(-cap, min(cap, v)) / cap * (height / 2), 1)
+    pts = [(x(i), y(v)) for i, v in enumerate(vals)]
+    area = (f"M0,{height/2} " + " ".join(f"L{a},{b}" for a, b in pts)
+            + f" L{width},{height/2} Z")
+    line = "M" + " L".join(f"{a},{b}" for a, b in pts)
+    ticks = "".join(
+        f"<line x1='{x(i)}' y1='0' x2='{x(i)}' y2='{height}' "
+        f"stroke='var(--rule)' stroke-width='1'/>"
+        for i, p in enumerate(plies) if p["move_no"] % 10 == 0 and p["side"] == "w")
+    return f"""<svg viewBox="0 0 {width} {height}" class="track" role="img">
+ {ticks}
+ <path d="{area}" fill="{colour}" opacity="0.22"/>
+ <path d="{line}" fill="none" stroke="{colour}" stroke-width="1.5"/>
+ <line x1="0" y1="{height/2}" x2="{width}" y2="{height/2}"
+       stroke="var(--muted)" stroke-width="1" stroke-dasharray="3 3"/>
+</svg>"""
+
+
+def _tracks(story: dict) -> str:
+    """Activity and initiative across the game — what the eval curve cannot say.
+
+    Evaluation answers who is BETTER. These answer why: whose pieces are doing
+    more work, and who is dictating. They disagree with the eval often, and
+    that disagreement is the point — being worse with the initiative is a
+    different game from being worse and passive."""
+    t = story.get("tracks") or {}
+    a, i = t.get("activity") or [], t.get("initiative") or []
+    if not a and not i:
+        return ""
+    plies = story["plies"]
+    bases = t.get("bases") or {}
+    # initiative appends a face to the basis ("geometry-prior+development"),
+    # so an exact-key lookup silently under-reports the fallback and the page
+    # would claim engine backing it does not have.
+    prior = sum(n for k, n in bases.items() if k.startswith("geometry-prior"))
+    note = ""
+    if prior:
+        note = (f" {prior} of {sum(bases.values())} positions had no second "
+                f"engine line and fall back to the weaker geometry reading.")
+    return f"""<section id="tracks">
+  <h2>Activity and initiative</h2>
+  <p class="lede">The evaluation says who is better. These say why — whose
+     pieces are doing more work, and who is dictating play. Both are drawn
+     White-positive above the centre line, on the same scale of moves as the
+     curve above.</p>
+  <div class="track-row">
+    <div class="track-label"><b>Activity</b>
+      <span>how much more work one side's pieces are doing</span></div>
+    {_track_svg(a, plies, cap=200.0, colour="#3A6EA5")}
+  </div>
+  <div class="track-row">
+    <div class="track-label"><b>Initiative</b>
+      <span>who is making the threats</span></div>
+    {_track_svg(i, plies, cap=1.0, colour="#A6392E")}
+  </div>
+  <p class="note">Initiative is read from the engine's best-vs-second-line
+     spread — the side whose alternatives fall away is the side being
+     dictated to.{_e(note)}</p>
+</section>"""
+
+
 def _acts(story: dict) -> str:
     """The arc, as a sentence per act."""
     say = {"level": "level", "edge": "a slight edge for {}",
@@ -461,6 +531,12 @@ def render(story: dict) -> str:
    border:1px solid var(--rule); }}
  .curve-key {{ display:flex; justify-content:space-between;
    font-family:Menlo,monospace; font-size:11px; color:var(--muted); }}
+ .track {{ width:100%; height:auto; display:block;
+   border:1px solid var(--rule); }}
+ .track-row {{ margin:14px 0; }}
+ .track-label {{ display:flex; align-items:baseline; gap:10px; margin-bottom:3px; }}
+ .track-label b {{ font-size:14px; font-weight:600; }}
+ .track-label span {{ color:var(--muted); font-size:12px; }}
  ol.arc {{ list-style:none; padding:0; margin:18px 0 0;
    column-width:250px; column-gap:28px; }}
  ol.arc li {{ display:flex; gap:10px; padding:3px 0;
@@ -597,6 +673,8 @@ def render(story: dict) -> str:
   {note}
   {chapters}
 </section>
+
+{_tracks(story)}
 
 {_bank(story, h)}
 

@@ -148,8 +148,15 @@ def _fast_pass(game: Game, engine, limit) -> tuple[list[dict], dict[str, Positio
             "best": {
                 "san": (_pv_to_san(p.fen_before, before.best_pv, 1) or [""])[0],
                 "pv_san": _pv_to_san(p.fen_before, before.best_pv),
+                "pv_uci": list(before.best_pv),
                 "eval_cp": before.best_score.to_ceiled_cp(),
             },
+            # 2nd-best score, mover POV — already computed (the pass runs at
+            # multipv=2 for the only-move glyph) and previously thrown away.
+            # It is the whole input to the validated "engine spread" reading of
+            # initiative, so recording it makes that free.
+            "second_cp": (None if before.second_score is None
+                          else before.second_score.to_ceiled_cp()),
             "refutation_pv": [],
             "motifs": [],
         })
@@ -181,8 +188,11 @@ def _deep_pass(game: Game, plies_out: list[dict], engine, limit) -> None:
         plies_out[i]["best"] = {
             "san": (_pv_to_san(p.fen_before, before.best_pv, 1) or [""])[0],
             "pv_san": _pv_to_san(p.fen_before, before.best_pv),
+            "pv_uci": list(before.best_pv),
             "eval_cp": before.best_score.to_ceiled_cp(),
         }
+        plies_out[i]["second_cp"] = (None if before.second_score is None
+                                     else before.second_score.to_ceiled_cp())
         plies_out[i]["motifs"] = _motifs(p.fen_before, engine, limit)
 
 

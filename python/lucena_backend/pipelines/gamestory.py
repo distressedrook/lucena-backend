@@ -234,6 +234,79 @@ def _ending(plies: list[dict], headers: dict, result: str) -> dict:
     return out
 
 
+def _tracks(plies: list[dict]) -> dict:
+    """Per-ply ACTIVITY and INITIATIVE, White-positive, for the whole game.
+
+    Two dimensions the eval curve cannot show. Evaluation says who is better;
+    these say WHY — whose pieces are doing more work, and who is dictating.
+    They routinely disagree with the eval and with each other, which is the
+    interesting part: a side can be worse on the board and still holding the
+    initiative, and that is a different game to play than being worse and
+    passive.
+
+    ACTIVITY is the positional term's own cp differential (mobility and
+    placement against a GM-fitted baseline). Static, exact, ~6ms.
+
+    INITIATIVE is `initiative.py`'s reading of who is dictating. Given two
+    engine lines it uses the VALIDATED engine-spread basis (the mover's
+    MultiPV gap — AUC 0.766 held-vs-failed); the second line's cp is all it
+    needs, and gamepass already computes it at multipv=2, so the whole track
+    is free of extra engine time. Where a second line does not exist (a
+    forced position) it degrades to the geometry prior and says so in
+    `basis`, which the renderer must not paper over.
+
+    CAVEAT, recorded rather than buried: the AUC was measured under the
+    production 4-PV contract at research node counts. This is 2 PVs at the
+    story's node budget — the same basis, a noisier estimate of it.
+    """
+    from ..plans.service import _bootstrap
+    _bootstrap()
+    from lucena_core import positional
+    from initiative import initiative
+
+    act, ini, bases = [], [], {}
+    for i, pr in enumerate(plies):
+        # AFTER the move, so all three lines on the chart show the same
+        # instant. The eval curve already plots fen_after; reading these at
+        # fen_before would offset them by a ply and invite the reader to
+        # attribute a swing to the wrong move.
+        fen = pr.get("fen_after")
+        if not fen:
+            continue
+        # ...and the engine's lines for THIS position are the ones recorded
+        # against the NEXT ply, whose fen_before is this fen_after.
+        nxt = plies[i + 1] if i + 1 < len(plies) else None
+        white_to_move = (nxt or {}).get("side", "b" if pr["side"] == "w" else "w") == "w"
+        try:
+            terms = positional.analyze_positional(Board(fen))["terms"]
+            a = int((terms.get("activity") or {}).get("cp") or 0)
+        except Exception as exc:
+            _log.debug("activity failed on %s: %s", fen, exc)
+            a = 0
+
+        # gamepass scores are MOVER POV; the (fen, pvs, rolls) contract is
+        # White POV. Getting this backwards silently mirrors the track for
+        # every Black ply, which reads as violent oscillation.
+        sign = 1 if white_to_move else -1
+        pvs = None
+        src = (nxt or {}).get("best") or {}
+        best_cp, second_cp = src.get("eval_cp"), (nxt or {}).get("second_cp")
+        if best_cp is not None:
+            pvs = [{"cp": sign * best_cp, "ucis": list(src.get("pv_uci") or [])}]
+            if second_cp is not None:
+                pvs.append({"cp": sign * second_cp, "ucis": []})
+        try:
+            iv = initiative(fen, pvs)
+            d = float(iv.get("diff") or 0.0)
+            bases[iv.get("basis", "?")] = bases.get(iv.get("basis", "?"), 0) + 1
+        except Exception as exc:
+            _log.debug("initiative failed on %s: %s", fen, exc)
+            d = 0.0
+        act.append(round(a, 1))
+        ini.append(round(d, 3))
+    return {"activity": act, "initiative": ini, "bases": bases}
+
+
 def _opening(plies: list[dict]) -> dict:
     """The opening this game actually played, from our own table.
 
@@ -766,6 +839,7 @@ def build_story(pgn_text: str, engine, pool, maia=None, *,
         "ending": _ending(plies, dict(game.headers),
                           analysis["game"].get("result", "")),
         "opening": _opening(plies),
+        "tracks": _tracks(plies),
         "moments": [asdict(m) for m in moments],
         "summary": analysis["summary"],
         "patterns": _patterns(plies, moments, game.headers),

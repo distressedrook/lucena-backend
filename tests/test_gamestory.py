@@ -456,3 +456,59 @@ def test_a_theory_position_is_never_spent_on_a_plan_chapter():
     assert got, "the out-of-book tail should still supply candidates"
     assert all(not p["in_book"] for p in got)
     assert min(p["ply"] for p in got) > 24
+
+
+# ------------------------------------------------- the activity / initiative tracks
+
+def _track_plies(n=8):
+    import chess
+    b, plies = chess.Board(), []
+    sans = "e4 e5 Nf3 Nc6 Bc4 Bc5 O-O Nf6".split()[:n]
+    for i, san in enumerate(sans, 1):
+        pr = _ply(ply=i, move_no=(i + 1) // 2, side="w" if i % 2 else "b",
+                  fen_before=b.fen())
+        b.push_san(san)
+        pr["fen_after"] = b.fen()
+        pr["best"] = {"san": san, "pv_san": [], "pv_uci": [], "eval_cp": 30}
+        pr["second_cp"] = -10
+        plies.append(pr)
+    return plies
+
+
+def test_tracks_are_measured_after_the_move_like_the_eval_curve():
+    """The eval curve plots fen_after. Reading the tracks at fen_before would
+    offset them by a ply and invite blaming the wrong move for a swing."""
+    plies = _track_plies()
+    t = gs._tracks(plies)
+    assert len(t["activity"]) == len(plies) == len(t["initiative"])
+    # the opening position is symmetric; after 1.e4 it is not
+    from lucena_core import positional
+    from lucena_core.board import Board
+    after_e4 = positional.analyze_positional(
+        Board(plies[0]["fen_after"]))["terms"]["activity"]["cp"]
+    assert t["activity"][0] == pytest.approx(after_e4, abs=0.5)
+
+
+def test_the_track_uses_the_validated_engine_spread_where_lines_exist():
+    """initiative's engine-spread basis (AUC 0.766) needs only the second
+    line's cp, which gamepass already computes — the track must actually use
+    it rather than silently sitting on the weaker geometry prior."""
+    t = gs._tracks(_track_plies())
+    assert sum(n for k, n in t["bases"].items()
+               if k.startswith("geometry-prior")) <= 1, t["bases"]
+    assert sum(v for k, v in t["bases"].items() if "engine-spread" in k) >= 1
+
+
+def test_a_position_with_no_following_line_degrades_and_says_so():
+    """The final position has no next ply to borrow engine lines from. It must
+    fall back visibly, not fabricate a spread."""
+    plies = _track_plies(2)
+    for p in plies:
+        p["second_cp"] = None
+        p["best"] = {"san": "", "pv_san": [], "pv_uci": [], "eval_cp": None}
+    t = gs._tracks(plies)
+    # the basis carries a face suffix ("geometry-prior+development"), so match
+    # the prefix — an exact lookup under-reports the fallback, which is how the
+    # renderer's own count was wrong until this test was written
+    assert sum(n for k, n in t["bases"].items()
+               if k.startswith("geometry-prior")) == len(plies), t["bases"]
