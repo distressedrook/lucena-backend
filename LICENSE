@@ -1,15 +1,12 @@
-Copyright (c) 2026 Avismara. All rights reserved.
+GNU AFFERO GENERAL PUBLIC LICENSE
+Version 3, 19 November 2007
 
-PROPRIETARY AND CONFIDENTIAL.
+Copyright (C) 2026 Avismara
 
-lucena-backend is proprietary software. No license, right, or permission is
-granted to use, copy, modify, distribute, or create derivative works of this
-software, in whole or in part, except under a separate written agreement with
-the copyright holder.
+The Lucena backend is licensed under the GNU Affero General Public License,
+version 3 or any later version (AGPL-3.0-or-later).
 
-lucena-backend communicates with the separately-published `lucena-engine`
-(AGPL-3.0-or-later). That engine is dual-licensed by its sole copyright holder,
-who reserves the right to use it in this proprietary work; the AGPL grant runs
-to third parties, not to the author. See lucena-engine's LICENSE and NOTICE.
+The complete license text is available at:
+https://www.gnu.org/licenses/agpl-3.0.html
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+SPDX-License-Identifier: AGPL-3.0-or-later

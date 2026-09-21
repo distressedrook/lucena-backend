@@ -1,6 +1,9 @@
-# backend — closed-source application layer
+# backend — Lucena application layer
 
-The proprietary application stack:
+The backend is open-source under AGPL-3.0-or-later. It is the application layer
+that turns grounded chess facts into a stateful coaching experience.
+
+The open-source application stack:
 - **ConversationLoop** — a deterministic loop that routes every turn/move by mode: an active Lesson on
   the chat → coach mode (adjudicates the move), else freeform mode (explains the move / answers the
   question). It grounds the facts via the engine, then asks the model for ONE grounded generation. The

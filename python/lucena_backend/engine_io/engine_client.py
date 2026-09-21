@@ -1,5 +1,5 @@
 """The backend's client to the open grounding engine (gRPC). This is the ONLY way
-the backend reaches chess truth — it never imports engine code (open/closed firewall).
+the backend reaches chess truth — it never imports engine code (component firewall).
 Returns plain dicts the orchestrator/flows hand to the LLM.
 """
 

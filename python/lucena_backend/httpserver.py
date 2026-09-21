@@ -2,7 +2,7 @@
 
 The backend uses the in-process ToolContext (the full legacy coach: analyze/evaluate/hints, drills
 via DrillState + build_line_tree, poisoned lines, Maia move-meaning) — NOT a thin gRPC path — so
-drills and Maia coaching behave exactly as before. (The open/closed engine firewall is set aside for
+drills and Maia coaching behave exactly as before. (The engine component firewall is set aside for
 now; ToolContext calls lucena_engine in-process. Re-splitting it over gRPC is a follow-up.)
 
 WS `/ws`: snapshot on connect then the StateStore's deltas; client sends turn/explain/position/view/
